@@ -1,0 +1,5 @@
+7f92e9169ebcacf1488ce6954f18c4de85f93b636f2016892433ba40d0404cdc  /home/thearius/al80-research/checkpoints/al80-performance-stable-v2-fast-snake/20260820-211353/rules.mk
+239b37db677a8935d0d9ede5140b47a12437239e05865f1f43cb8701945dde3d  /home/thearius/al80-research/checkpoints/al80-performance-stable-v2-fast-snake/20260820-211353/config.h
+16110e93b47c3ccbb45a66a4f93d2839df44133676faac8cf9aba982580fa2d5  /home/thearius/al80-research/checkpoints/al80-performance-stable-v2-fast-snake/20260820-211353/al80_screen.c
+7031e88f95c42b1b3c208c000d33102fb2fd7467ed80aee4cf5933a4e280972e  /home/thearius/al80-research/checkpoints/al80-performance-stable-v2-fast-snake/20260820-211353/keymap.c
+198ae7a3d5c4329de43910c5345911514031da006d9f6074c57b020262995a5e  /home/thearius/al80-research/checkpoints/al80-performance-stable-v2-fast-snake/20260820-211353/yunzii_al80_al80_rgb_probe.bin

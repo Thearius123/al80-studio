@@ -1,0 +1,6 @@
+[package]
+name = "al80-core"
+version = "0.2.0-alpha"
+edition = "2024"
+
+[dependencies]
