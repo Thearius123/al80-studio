@@ -271,6 +271,130 @@ impl Al80 {
         ))
     }
 
+    /// Send one complete 32-byte vendor payload through Linux hidraw.
+    ///
+    /// LCD responses are returned raw because the currently known commands
+    /// use command-specific ACK offsets.
+    fn transact_raw32(
+        &mut self,
+        payload: &[u8; REPORT_BYTES],
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, f64), String> {
+        self.drain()?;
+
+        let mut request = [0u8; LINUX_WRITE_BYTES];
+        request[0] = 0;
+        request[1..].copy_from_slice(payload);
+
+        let started = Instant::now();
+        self.write_request(&request)?;
+
+        let deadline = started + timeout;
+        let mut buffer = [0u8; 64];
+
+        while Instant::now() < deadline {
+            match self.file.read(&mut buffer) {
+                Ok(0) => {
+                    thread::sleep(Duration::from_micros(400));
+                }
+                Ok(count) => {
+                    let elapsed_ms =
+                        started.elapsed().as_secs_f64() * 1000.0;
+                    return Ok((buffer[..count].to_vec(), elapsed_ms));
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_micros(400));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Raw HID LCD read failed: {e}"
+                    ));
+                }
+            }
+        }
+
+        Err("timeout waiting for LCD Raw HID response".to_string())
+    }
+
+    /// Return the keyboard LCD to its normal HOME screen.
+    pub fn lcd_home(&mut self) -> Result<(), String> {
+        const GO_HOME: [u8; 7] = [
+            0xA5, 0x5A, 0x0B, 0x00, 0x00, 0x02, 0x00,
+        ];
+
+        let mut begin = [0u8; REPORT_BYTES];
+        begin[0] = 0x40;
+        begin[3] = GO_HOME.len() as u8;
+        begin[7..7 + GO_HOME.len()].copy_from_slice(&GO_HOME);
+
+        let (response, _) =
+            self.transact_raw32(&begin, Duration::from_millis(500))?;
+
+        if response.len() <= 6 || response[6] != STATUS_OK {
+            let status = response.get(6).copied();
+            return Err(format!(
+                "LCD HOME begin ACK invalid: response[6]={}",
+                status
+                    .map(|value| format!("0x{value:02X}"))
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+
+        let mut end = [0u8; REPORT_BYTES];
+        end[0] = 0x42;
+
+        let (response, _) =
+            self.transact_raw32(&end, Duration::from_millis(500))?;
+
+        if response.len() <= 6 || response[6] != STATUS_OK {
+            let status = response.get(6).copied();
+            return Err(format!(
+                "LCD HOME end ACK invalid: response[6]={}",
+                status
+                    .map(|value| format!("0x{value:02X}"))
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Show a volatile host volume/mute OSD on the keyboard LCD.
+    pub fn lcd_volume_osd(
+        &mut self,
+        percent: u8,
+        muted: bool,
+    ) -> Result<f64, String> {
+        if percent > 100 {
+            return Err(format!(
+                "LCD volume percent out of range: {percent}"
+            ));
+        }
+
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = 0x43;
+        payload[1] = percent;
+        payload[2] = if muted { 1 } else { 0 };
+
+        let (response, elapsed_ms) =
+            self.transact_raw32(
+                &payload,
+                Duration::from_millis(500),
+            )?;
+
+        if response.len() <= 3 || response[3] != STATUS_OK {
+            let status = response.get(3).copied();
+            return Err(format!(
+                "LCD volume ACK invalid: response[3]={}",
+                status
+                    .map(|value| format!("0x{value:02X}"))
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+
+        Ok(elapsed_ms)
+    }
+
     pub fn scan_rate_hz(&mut self) -> Result<u32, String> {
         let payload = self.transact(CMD_SCAN_RATE, None)?;
 

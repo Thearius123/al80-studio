@@ -25,6 +25,9 @@ fn print_help() {
     println!("  al80-core overlay status");
     println!("  al80-core overlay on");
     println!("  al80-core overlay off");
+    println!("  al80-core lcd home");
+    println!("  al80-core lcd volume <0-100>");
+    println!("  al80-core lcd mute <0-100>");
     println!("  al80-core help");
     println!("  al80-core version");
     println!();
@@ -216,6 +219,85 @@ fn command_overlay(action: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn command_lcd(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err(
+            "usage: al80-core lcd home|volume <0-100>|mute <0-100>"
+                .to_string()
+        );
+    }
+
+    let mut device = connect()?;
+
+    match args[0].as_str() {
+        "home" => {
+            if args.len() != 1 {
+                return Err(
+                    "usage: al80-core lcd home".to_string()
+                );
+            }
+
+            device.lcd_home()?;
+
+            println!("LCD_COMMAND=HOME");
+            println!("RAW_HID_COMMANDS=0x40,0x42");
+            println!("COMMAND_CLASS=VOLATILE_DISPLAY");
+            println!("LCD_MEDIA_WRITE=NO");
+            println!("PERSISTENT_WRITE=NO");
+        }
+
+        "volume" | "mute" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "usage: al80-core lcd {} <0-100>",
+                    args[0]
+                ));
+            }
+
+            let percent = args[1]
+                .parse::<u8>()
+                .map_err(|_| {
+                    format!(
+                        "invalid volume percent: {}",
+                        args[1]
+                    )
+                })?;
+
+            if percent > 100 {
+                return Err(
+                    "volume percent must be between 0 and 100"
+                        .to_string()
+                );
+            }
+
+            let muted = args[0] == "mute";
+            let ack_ms =
+                device.lcd_volume_osd(percent, muted)?;
+
+            println!("LCD_COMMAND=0x43");
+            println!("LCD_PERCENT={percent}");
+            println!(
+                "LCD_MUTED={}",
+                if muted { "YES" } else { "NO" }
+            );
+            println!("LCD_ACK_MS={ack_ms:.3}");
+            println!("COMMAND_CLASS=VOLATILE_DISPLAY");
+            println!("HOST_AUDIO_CHANGED=NO");
+            println!("LCD_MEDIA_WRITE=NO");
+            println!("PERSISTENT_WRITE=NO");
+        }
+
+        other => {
+            return Err(format!(
+                "unknown lcd command: {other}"
+            ));
+        }
+    }
+
+    println!("AL80_CORE_LCD_GATE=PASS");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -262,6 +344,10 @@ fn run() -> Result<(), String> {
             }
 
             command_overlay(&args[1])
+        }
+
+        "lcd" => {
+            command_lcd(&args[1..])
         }
 
         "help" | "--help" | "-h" => {
