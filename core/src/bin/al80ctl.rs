@@ -1,0 +1,179 @@
+use std::env;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::time::Duration;
+
+fn socket_path() -> PathBuf {
+    if let Ok(runtime) = env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime).join("al80d.sock");
+    }
+
+    let user = env::var("USER").unwrap_or_else(|_| "user".to_string());
+    PathBuf::from(format!("/tmp/al80d-{user}.sock"))
+}
+
+fn request(command: &str) -> Result<String, String> {
+    let path = socket_path();
+
+    let mut stream = UnixStream::connect(&path).map_err(|error| {
+        format!(
+            "cannot connect to al80d at {}: {error}",
+            path.display()
+        )
+    })?;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| {
+            format!("cannot set read timeout: {error}")
+        })?;
+
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| {
+            format!("cannot set write timeout: {error}")
+        })?;
+
+    writeln!(stream, "{command}").map_err(|error| {
+        format!("cannot write request: {error}")
+    })?;
+
+    stream.flush().map_err(|error| {
+        format!("cannot flush request: {error}")
+    })?;
+
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|error| {
+            format!("cannot read response: {error}")
+        })?;
+
+    let response = response.trim().to_string();
+
+    if response.is_empty() {
+        return Err("al80d returned an empty response".to_string());
+    }
+
+    if let Some(error) = response.strip_prefix("ERR ") {
+        return Err(error.to_string());
+    }
+
+    Ok(response)
+}
+
+fn help() {
+    println!("AL80 Studio Control CLI");
+    println!();
+    println!("Usage:");
+    println!("  al80ctl ping");
+    println!("  al80ctl status");
+    println!("  al80ctl capabilities");
+    println!("  al80ctl audio");
+    println!("  al80ctl rgb on|off");
+    println!("  al80ctl overlay status|on|off");
+    println!("  al80ctl lcd home");
+    println!("  al80ctl lcd volume <0-100>");
+    println!("  al80ctl lcd mute <0-100>");
+}
+
+fn percent(raw: &str) -> Result<u8, String> {
+    let value = raw
+        .parse::<u8>()
+        .map_err(|_| format!("invalid percent: {raw}"))?;
+
+    if value > 100 {
+        return Err(
+            "percent must be between 0 and 100".to_string()
+        );
+    }
+
+    Ok(value)
+}
+
+fn build_command(args: &[String]) -> Result<String, String> {
+    match args {
+        [cmd] if cmd == "ping" => Ok("PING".to_string()),
+        [cmd] if cmd == "status" => Ok("STATUS".to_string()),
+        [cmd] if cmd == "capabilities" => {
+            Ok("CAPABILITIES".to_string())
+        }
+        [cmd] if cmd == "audio" => {
+            Ok("AUDIO CURRENT".to_string())
+        }
+
+        [group, state]
+            if group == "rgb"
+                && (state == "on" || state == "off") =>
+        {
+            Ok(format!("RGB {}", state.to_ascii_uppercase()))
+        }
+
+        [group, state]
+            if group == "overlay"
+                && matches!(
+                    state.as_str(),
+                    "status" | "on" | "off"
+                ) =>
+        {
+            Ok(format!(
+                "OVERLAY {}",
+                state.to_ascii_uppercase()
+            ))
+        }
+
+        [group, state]
+            if group == "lcd" && state == "home" =>
+        {
+            Ok("LCD HOME".to_string())
+        }
+
+        [group, mode, raw]
+            if group == "lcd"
+                && (mode == "volume" || mode == "mute") =>
+        {
+            let value = percent(raw)?;
+
+            Ok(format!(
+                "LCD {} {}",
+                mode.to_ascii_uppercase(),
+                value
+            ))
+        }
+
+        _ => Err("invalid command; run al80ctl help".to_string()),
+    }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    if args.is_empty()
+        || args == ["help".to_string()]
+        || args == ["--help".to_string()]
+        || args == ["-h".to_string()]
+    {
+        help();
+        return;
+    }
+
+    let command = match build_command(&args) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("ERROR={error}");
+            std::process::exit(2);
+        }
+    };
+
+    match request(&command) {
+        Ok(response) => {
+            println!("{response}");
+        }
+
+        Err(error) => {
+            eprintln!("ERROR={error}");
+            std::process::exit(1);
+        }
+    }
+}

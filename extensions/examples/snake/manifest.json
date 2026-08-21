@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.al80studio.effect.snake",
+  "name": "Snake",
+  "kind": "firmware-effect",
+  "description": "Known AL80 Studio extended-firmware RGB overlay effect.",
+  "requires": {
+    "firmwareMode": "extended",
+    "capabilities": [
+      "rgb_runtime",
+      "overlay"
+    ]
+  },
+  "activation": {
+    "ipcCommand": "OVERLAY ON"
+  },
+  "safety": {
+    "firmwareFlash": false,
+    "eepromWrite": false,
+    "persistentLcdWrite": false
+  }
+}

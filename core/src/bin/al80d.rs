@@ -148,6 +148,43 @@ fn status_line(shared: &SharedDevice) -> Result<String, String> {
     })
 }
 
+fn capabilities_line(
+    shared: &SharedDevice,
+) -> Result<String, String> {
+    let mut owner = lock_device(shared)?;
+
+    owner.operation(|device| {
+        let scan = device.scan_rate_hz()?;
+        let rgb = device.rgb_core_enabled()?;
+        let overlay = device.overlay_status()?;
+
+        Ok(format!(
+            concat!(
+                "OK api=1 daemon=0.1.0 ",
+                "firmware=EXTENDED ",
+                "matrix_scan=YES ",
+                "rgb_runtime=YES ",
+                "overlay=YES ",
+                "lcd_osd=YES ",
+                "audio_watch=YES ",
+                "profiles=NO ",
+                "extension_manifest=V1 ",
+                "persistent_write=NO ",
+                "eeprom_write=NO ",
+                "qmk_flash=NO ",
+                "scan_hz={} ",
+                "rgb_state={} ",
+                "overlay_state={} ",
+                "overlay_rgb_state={}"
+            ),
+            scan,
+            if rgb { "ON" } else { "OFF" },
+            if overlay.enabled { "ON" } else { "OFF" },
+            if overlay.rgb_core_enabled { "ON" } else { "OFF" },
+        ))
+    })
+}
+
 fn parse_percent(value: Option<&str>) -> Result<u8, String> {
     let raw = value.ok_or_else(|| "missing percent".to_string())?;
     let percent = raw
@@ -173,6 +210,8 @@ fn handle_request(
 
     match fields.as_slice() {
         ["PING"] => Ok("OK PONG".to_string()),
+
+        ["CAPABILITIES"] => capabilities_line(shared),
 
         ["STATUS"] => status_line(shared),
 

@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://al80-studio.dev/schemas/extension-manifest-v1.json",
+  "title": "AL80 Studio Extension Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "kind",
+    "description",
+    "requires",
+    "safety"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 3
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "runtime-feature",
+        "firmware-effect",
+        "lcd-widget",
+        "profile"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firmwareMode",
+        "capabilities"
+      ],
+      "properties": {
+        "firmwareMode": {
+          "enum": [
+            "stock",
+            "extended",
+            "any"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ipcCommand": {
+          "type": "string"
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firmwareFlash",
+        "eepromWrite",
+        "persistentLcdWrite"
+      ],
+      "properties": {
+        "firmwareFlash": {
+          "type": "boolean"
+        },
+        "eepromWrite": {
+          "type": "boolean"
+        },
+        "persistentLcdWrite": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
