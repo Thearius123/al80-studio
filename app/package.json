@@ -1,0 +1,20 @@
+{
+  "name": "al80-studio",
+  "private": true,
+  "version": "0.3.0-alpha",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "latest"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}
