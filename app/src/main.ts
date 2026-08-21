@@ -41,6 +41,67 @@ interface Capabilities {
   error: string | null;
 }
 
+interface ExtensionRequirements {
+  firmwareMode: "stock" | "extended" | "any";
+  capabilities: string[];
+}
+
+interface ExtensionActivation {
+  enableCommand?: string;
+  disableCommand?: string;
+  stateField?: "overlayEnabled" | "rgbCoreEnabled";
+}
+
+interface ExtensionSafety {
+  firmwareFlash: boolean;
+  eepromWrite: boolean;
+  persistentLcdWrite: boolean;
+}
+
+interface ExtensionParameter {
+  id: string;
+  label: string;
+  kind: "range" | "toggle" | "select";
+  runtimeBinding: "unavailable" | "future";
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+}
+
+interface ExtensionManifest {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  kind:
+    | "runtime-feature"
+    | "firmware-effect"
+    | "lcd-widget"
+    | "profile";
+  description: string;
+  requires: ExtensionRequirements;
+  activation?: ExtensionActivation;
+  parameters?: ExtensionParameter[];
+  safety: ExtensionSafety;
+  source: string;
+}
+
+interface ExtensionRegistry {
+  schemaVersion: 1;
+  generatedBy: string;
+  extensions: ExtensionManifest[];
+}
+
+interface HostProfile {
+  id: string;
+  name: string;
+  rgbEnabled: boolean;
+  overlayEnabled: boolean;
+  createdAt: string;
+}
+
+const PROFILE_KEY = "al80-studio.host-profiles.v1";
+
 function requireAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
 
@@ -56,6 +117,8 @@ const app = requireAppRoot();
 let view: View = "dashboard";
 let status: DeviceStatus | null = null;
 let capabilities: Capabilities | null = null;
+let registry: ExtensionRegistry | null = null;
+let profiles: HostProfile[] = loadProfiles();
 let busy = false;
 let notice = "";
 
@@ -77,6 +140,64 @@ function onOff(value: boolean | null | undefined): string {
   if (value === true) return "ON";
   if (value === false) return "OFF";
   return "—";
+}
+
+function loadProfiles(): HostProfile[] {
+  try {
+    const raw = localStorage.getItem(PROFILE_KEY);
+
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((item): item is HostProfile => {
+      if (typeof item !== "object" || item === null) {
+        return false;
+      }
+
+      const profile = item as Partial<HostProfile>;
+
+      return (
+        typeof profile.id === "string" &&
+        typeof profile.name === "string" &&
+        typeof profile.rgbEnabled === "boolean" &&
+        typeof profile.overlayEnabled === "boolean" &&
+        typeof profile.createdAt === "string"
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveProfiles(): void {
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles));
+}
+
+async function loadRegistry(): Promise<ExtensionRegistry> {
+  const response = await fetch("./extensions/registry.json", {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Extension registry failed: HTTP ${response.status}`,
+    );
+  }
+
+  const value = (await response.json()) as ExtensionRegistry;
+
+  if (value.schemaVersion !== 1 || !Array.isArray(value.extensions)) {
+    throw new Error("Invalid extension registry");
+  }
+
+  return value;
 }
 
 function navButton(id: View, label: string): string {
@@ -112,6 +233,169 @@ function badge(
   return `<span class="badge ${tone}">${esc(label)}</span>`;
 }
 
+function capabilityValue(name: string): boolean {
+  if (!capabilities) return false;
+
+  switch (name) {
+    case "matrix_scan":
+      return capabilities.matrixScan;
+    case "rgb_runtime":
+      return capabilities.rgbRuntime;
+    case "overlay":
+      return capabilities.overlay;
+    case "lcd_osd":
+      return capabilities.lcdOsd;
+    case "audio_watch":
+      return capabilities.audioWatch;
+    case "profiles":
+      return capabilities.profiles;
+    default:
+      return false;
+  }
+}
+
+function extensionCompatible(ext: ExtensionManifest): boolean {
+  if (!capabilities || capabilities.error) {
+    return false;
+  }
+
+  const firmware = ext.requires.firmwareMode;
+
+  if (
+    firmware !== "any" &&
+    firmware.toUpperCase() !== capabilities.firmwareMode.toUpperCase()
+  ) {
+    return false;
+  }
+
+  return ext.requires.capabilities.every(capabilityValue);
+}
+
+function extensionSafe(ext: ExtensionManifest): boolean {
+  return (
+    ext.safety.firmwareFlash === false &&
+    ext.safety.eepromWrite === false &&
+    ext.safety.persistentLcdWrite === false
+  );
+}
+
+function extensionActive(ext: ExtensionManifest): boolean {
+  switch (ext.activation?.stateField) {
+    case "overlayEnabled":
+      return status?.overlayEnabled === true;
+    case "rgbCoreEnabled":
+      return status?.rgbCoreEnabled === true;
+    default:
+      return false;
+  }
+}
+
+function extensionCards(): string {
+  const effects = (registry?.extensions ?? []).filter(
+    (ext) =>
+      ext.kind === "firmware-effect" ||
+      ext.kind === "runtime-feature",
+  );
+
+  if (effects.length === 0) {
+    return `
+      <article class="panel empty-state">
+        <div class="placeholder-plus">+</div>
+        <h2>No extensions found</h2>
+        <p class="muted">
+          Add a manifest under extensions/ and rebuild the registry.
+        </p>
+      </article>
+    `;
+  }
+
+  return effects
+    .map((ext) => {
+      const compatible = extensionCompatible(ext);
+      const safe = extensionSafe(ext);
+      const active = extensionActive(ext);
+      const canToggle =
+        compatible &&
+        safe &&
+        Boolean(ext.activation?.enableCommand) &&
+        Boolean(ext.activation?.disableCommand);
+
+      const parameters = ext.parameters ?? [];
+
+      return `
+        <article
+          class="effect-card ${active ? "effect-active" : ""}"
+          data-extension-id="${esc(ext.id)}"
+        >
+          <div class="effect-preview snake-preview" aria-hidden="true">
+            <div class="snake-dot s1"></div>
+            <div class="snake-dot s2"></div>
+            <div class="snake-dot s3"></div>
+            <div class="snake-dot s4"></div>
+            <div class="snake-dot s5"></div>
+          </div>
+
+          <div class="effect-body">
+            <div class="panel-title-row">
+              <div>
+                <p class="eyebrow">${esc(ext.kind)}</p>
+                <h2>${esc(ext.name)}</h2>
+              </div>
+
+              ${badge(
+                compatible && safe ? "Compatible" : "Unavailable",
+                compatible && safe ? "good" : "warn",
+              )}
+            </div>
+
+            <p>${esc(ext.description)}</p>
+
+            <div class="chip-row">
+              ${ext.requires.capabilities
+                .map((cap) => badge(cap))
+                .join("")}
+              ${badge(ext.requires.firmwareMode)}
+              ${safe ? badge("Safe runtime", "good") : badge("Risky", "warn")}
+            </div>
+
+            ${
+              parameters.length > 0
+                ? `
+                  <div class="parameter-note">
+                    ${parameters.length} parameter definition(s) found.
+                    Runtime parameter binding is intentionally not enabled
+                    until a hardware command is reverse-engineered and gated.
+                  </div>
+                `
+                : ""
+            }
+
+            <div class="manifest-source">
+              ${esc(ext.source)}
+            </div>
+
+            <div class="effect-actions">
+              <div>
+                <span class="state-label">Current state</span>
+                <strong>${active ? "Enabled" : "Disabled"}</strong>
+              </div>
+
+              <button
+                class="primary-btn extension-toggle"
+                data-extension-id="${esc(ext.id)}"
+                type="button"
+                ${!canToggle || busy ? "disabled" : ""}
+              >
+                ${active ? `Disable ${esc(ext.name)}` : `Enable ${esc(ext.name)}`}
+              </button>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function renderDashboard(): string {
   const scanHz = status?.matrixScanHz
     ? `${status.matrixScanHz} Hz`
@@ -137,13 +421,22 @@ function renderDashboard(): string {
       </div>
 
       <div class="metric-grid">
-        ${metric("Connection", status?.connected ? "Connected" : "Offline",
-          status?.devnode ?? "No device")}
+        ${metric(
+          "Connection",
+          status?.connected ? "Connected" : "Offline",
+          status?.devnode ?? "No device",
+        )}
         ${metric("Matrix Scan", scanHz, interval)}
-        ${metric("RGB Engine", onOff(status?.rgbCoreEnabled),
-          "Runtime / volatile")}
-        ${metric("Snake / Overlay", onOff(status?.overlayEnabled),
-          capabilities?.firmwareMode ?? "Unknown firmware")}
+        ${metric(
+          "RGB Engine",
+          onOff(status?.rgbCoreEnabled),
+          "Runtime / volatile",
+        )}
+        ${metric(
+          "Extensions",
+          String(registry?.extensions.length ?? 0),
+          registry?.generatedBy ?? "Registry unavailable",
+        )}
       </div>
 
       <article class="panel">
@@ -164,8 +457,8 @@ function renderDashboard(): string {
         </div>
 
         <p class="muted">
-          Volume OSD, LCD, RGB, Snake and the GUI share one serialized
-          hardware owner instead of competing for hidraw replies.
+          Effects are now described by manifests instead of being permanently
+          hardcoded into the frontend.
         </p>
       </article>
     </section>
@@ -173,95 +466,26 @@ function renderDashboard(): string {
 }
 
 function renderEffects(): string {
-  const supported =
-    capabilities?.firmwareMode === "EXTENDED" &&
-    capabilities?.overlay === true;
-
-  const active = status?.overlayEnabled === true;
-
   return `
     <section class="page">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">Customization</p>
+          <p class="eyebrow">Manifest-driven customization</p>
           <h1>Effects</h1>
           <p>
-            Effects are enabled only when the connected firmware reports the
-            capabilities they require.
+            Compatible effects are loaded from the generated extension
+            registry and capability-checked against the connected keyboard.
           </p>
         </div>
+
         ${badge(
-          capabilities?.extensionManifest === "V1"
-            ? "Extension Manifest V1"
-            : "Manifest unavailable",
-          capabilities?.extensionManifest === "V1" ? "good" : "warn",
+          `${registry?.extensions.length ?? 0} extension(s)`,
+          registry ? "good" : "warn",
         )}
       </div>
 
-      <div class="effect-grid">
-        <article class="effect-card ${active ? "effect-active" : ""}">
-          <div class="effect-preview snake-preview" aria-hidden="true">
-            <div class="snake-dot s1"></div>
-            <div class="snake-dot s2"></div>
-            <div class="snake-dot s3"></div>
-            <div class="snake-dot s4"></div>
-            <div class="snake-dot s5"></div>
-          </div>
-
-          <div class="effect-body">
-            <div class="panel-title-row">
-              <div>
-                <p class="eyebrow">Firmware effect</p>
-                <h2>Snake</h2>
-              </div>
-              ${badge(
-                supported ? "Compatible" : "Unavailable",
-                supported ? "good" : "warn",
-              )}
-            </div>
-
-            <p>
-              The first AL80 Studio extended-firmware effect discovered and
-              controlled through the open capability layer.
-            </p>
-
-            <div class="chip-row">
-              ${badge("Extended firmware")}
-              ${badge("RGB runtime")}
-              ${badge("Overlay")}
-              ${badge("No EEPROM", "good")}
-              ${badge("No flash", "good")}
-            </div>
-
-            <div class="effect-actions">
-              <div>
-                <span class="state-label">Current state</span>
-                <strong>${active ? "Enabled" : "Disabled"}</strong>
-              </div>
-
-              <button
-                id="snake-toggle"
-                class="primary-btn"
-                type="button"
-                ${!supported || busy ? "disabled" : ""}
-              >
-                ${active ? "Disable Snake" : "Enable Snake"}
-              </button>
-            </div>
-          </div>
-        </article>
-
-        <article class="effect-card placeholder-card">
-          <div class="placeholder-plus">+</div>
-          <div>
-            <p class="eyebrow">Community extensions</p>
-            <h2>More effects</h2>
-            <p>
-              This slot will be populated from extension manifests as the
-              developer SDK grows.
-            </p>
-          </div>
-        </article>
+      <div class="effect-grid dynamic-effect-grid">
+        ${extensionCards()}
       </div>
     </section>
   `;
@@ -281,8 +505,10 @@ function renderRgb(): string {
             Runtime controls are volatile and routed through al80d.
           </p>
         </div>
-        ${badge(supported ? "Supported" : "Unavailable",
-          supported ? "good" : "warn")}
+        ${badge(
+          supported ? "Supported" : "Unavailable",
+          supported ? "good" : "warn",
+        )}
       </div>
 
       <article class="panel control-panel">
@@ -290,8 +516,7 @@ function renderRgb(): string {
           <p class="eyebrow">RGB core</p>
           <h2>${enabled ? "Lighting enabled" : "Lighting disabled"}</h2>
           <p class="muted">
-            Turning the RGB core off also stops visible overlay output until
-            RGB is enabled again.
+            RGB runtime remains independent from persistent firmware settings.
           </p>
         </div>
 
@@ -306,14 +531,12 @@ function renderRgb(): string {
       </article>
 
       <article class="panel">
-        <h2>Coming next</h2>
-        <div class="feature-list">
-          <span>Color</span>
-          <span>Brightness</span>
-          <span>Speed</span>
-          <span>Built-in effects</span>
-          <span>Custom effect parameters</span>
-        </div>
+        <h2>Parameter framework</h2>
+        <p class="muted">
+          Manifest V1 can already describe future range, toggle and select
+          parameters. Studio will not send a parameter until its hardware
+          command has been reverse-engineered and explicitly allowlisted.
+        </p>
       </article>
     </section>
   `;
@@ -329,12 +552,13 @@ function renderLcd(): string {
           <p class="eyebrow">Display</p>
           <h1>LCD</h1>
           <p>
-            Safe volatile preview controls for the protocol already validated
-            on the physical keyboard.
+            Safe volatile previews for the validated display protocol.
           </p>
         </div>
-        ${badge(supported ? "OSD supported" : "Unavailable",
-          supported ? "good" : "warn")}
+        ${badge(
+          supported ? "OSD supported" : "Unavailable",
+          supported ? "good" : "warn",
+        )}
       </div>
 
       <article class="panel">
@@ -347,8 +571,7 @@ function renderLcd(): string {
         </div>
 
         <p class="muted">
-          These buttons change only the keyboard display. They do not change
-          Fedora's actual volume.
+          These buttons change only the keyboard display.
         </p>
 
         <div class="button-row">
@@ -386,20 +609,59 @@ function renderLcd(): string {
           </button>
         </div>
       </article>
-
-      <article class="panel">
-        <h2>Future LCD widgets</h2>
-        <p class="muted">
-          Images, text, widgets and animations will use capability-gated
-          extension manifests rather than direct uncontrolled HID access.
-        </p>
-      </article>
     </section>
   `;
 }
 
 function renderProfiles(): string {
-  const supported = capabilities?.profiles === true;
+  const cards =
+    profiles.length === 0
+      ? `
+        <article class="panel empty-state">
+          <div class="placeholder-plus">+</div>
+          <h2>No host profiles yet</h2>
+          <p class="muted">
+            Save the current RGB and effect state to create your first one.
+          </p>
+        </article>
+      `
+      : profiles
+          .map(
+            (profile) => `
+              <article class="profile-card">
+                <div>
+                  <p class="eyebrow">Host profile</p>
+                  <h2>${esc(profile.name)}</h2>
+                  <div class="chip-row">
+                    ${badge(`RGB ${profile.rgbEnabled ? "ON" : "OFF"}`)}
+                    ${badge(`Snake ${profile.overlayEnabled ? "ON" : "OFF"}`)}
+                  </div>
+                  <small>${esc(profile.createdAt)}</small>
+                </div>
+
+                <div class="profile-actions">
+                  <button
+                    class="primary-btn profile-apply"
+                    data-profile-id="${esc(profile.id)}"
+                    type="button"
+                    ${busy ? "disabled" : ""}
+                  >
+                    Apply
+                  </button>
+
+                  <button
+                    class="secondary-btn profile-delete"
+                    data-profile-id="${esc(profile.id)}"
+                    type="button"
+                    ${busy ? "disabled" : ""}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </article>
+            `,
+          )
+          .join("");
 
   return `
     <section class="page">
@@ -408,22 +670,30 @@ function renderProfiles(): string {
           <p class="eyebrow">Configuration</p>
           <h1>Profiles</h1>
           <p>
-            Save combinations of RGB, effects, LCD behavior and future input
-            mappings.
+            Host Profiles V1 save safe runtime state locally in AL80 Studio.
+            They do not write EEPROM or persist settings into keyboard flash.
           </p>
         </div>
-        ${badge(
-          supported ? "Supported" : "Planned",
-          supported ? "good" : "neutral",
-        )}
+
+        <button
+          id="profile-save"
+          class="primary-btn"
+          type="button"
+          ${!status?.connected || busy ? "disabled" : ""}
+        >
+          Save current state
+        </button>
       </div>
 
-      <article class="panel empty-state">
-        <div class="placeholder-plus">+</div>
-        <h2>Profiles are the next runtime capability</h2>
+      <div class="profile-grid">
+        ${cards}
+      </div>
+
+      <article class="panel">
         <p class="muted">
-          The daemon currently advertises profiles=NO, so Studio correctly
-          keeps profile writes disabled instead of pretending they exist.
+          al80d still reports <code>profiles=NO</code> because firmware-side
+          profiles do not exist yet. Host Profiles are intentionally a
+          separate safe layer.
         </p>
       </article>
     </section>
@@ -438,21 +708,31 @@ function renderDiagnostics(): string {
           <p class="eyebrow">Developer tools</p>
           <h1>Diagnostics</h1>
           <p>
-            Exact capability contract and safety boundaries reported by al80d.
+            Capability contract, extension registry and safety boundaries.
           </p>
         </div>
         ${badge(`API ${capabilities?.api ?? "—"}`, "good")}
       </div>
 
       <div class="diagnostic-grid">
-        ${metric("Firmware mode",
-          capabilities?.firmwareMode ?? "Unknown")}
-        ${metric("Daemon",
-          capabilities?.daemonVersion ?? "Unknown")}
-        ${metric("Manifest",
-          capabilities?.extensionManifest ?? "None")}
-        ${metric("Raw HID owner", "al80d",
-          status?.devnode ?? "No device")}
+        ${metric(
+          "Firmware mode",
+          capabilities?.firmwareMode ?? "Unknown",
+        )}
+        ${metric(
+          "Daemon",
+          capabilities?.daemonVersion ?? "Unknown",
+        )}
+        ${metric(
+          "Extensions",
+          String(registry?.extensions.length ?? 0),
+          registry?.generatedBy ?? "Unavailable",
+        )}
+        ${metric(
+          "Raw HID owner",
+          "al80d",
+          status?.devnode ?? "No device",
+        )}
       </div>
 
       <article class="panel">
@@ -471,15 +751,15 @@ function renderDiagnostics(): string {
             <strong>${yesNo(capabilities?.qmkFlash)}</strong>
           </div>
           <div>
-            <span>Audio watcher</span>
-            <strong>${yesNo(capabilities?.audioWatch)}</strong>
+            <span>Arbitrary extension code</span>
+            <strong>No</strong>
           </div>
         </div>
       </article>
 
       <article class="panel code-panel">
-        <h2>Live capability object</h2>
-        <pre>${esc(JSON.stringify(capabilities, null, 2))}</pre>
+        <h2>Live extension registry</h2>
+        <pre>${esc(JSON.stringify(registry, null, 2))}</pre>
       </article>
     </section>
   `;
@@ -530,7 +810,9 @@ function render(): void {
             <span class="connection-dot ${connected ? "online" : ""}"></span>
             <span>${connected ? "AL80 connected" : "AL80 offline"}</span>
           </div>
-          <small>al80d single-owner runtime</small>
+          <small>
+            ${registry?.extensions.length ?? 0} manifest extension(s)
+          </small>
         </div>
       </aside>
 
@@ -551,14 +833,22 @@ function render(): void {
 
 async function refresh(message = ""): Promise<void> {
   try {
-    const [nextStatus, nextCaps] = await Promise.all([
+    const [nextStatus, nextCaps, nextRegistry] = await Promise.all([
       invoke<DeviceStatus>("get_device_status"),
       invoke<Capabilities>("get_capabilities"),
+      loadRegistry(),
     ]);
 
     status = nextStatus;
     capabilities = nextCaps;
-    notice = message || nextStatus.error || nextCaps.error || "";
+    registry = nextRegistry;
+    profiles = loadProfiles();
+
+    notice =
+      message ||
+      nextStatus.error ||
+      nextCaps.error ||
+      "";
   } catch (error) {
     notice = String(error);
   }
@@ -568,6 +858,7 @@ async function refresh(message = ""): Promise<void> {
 
 async function action(
   operation: () => Promise<void>,
+  successMessage = "Applied successfully.",
 ): Promise<void> {
   if (busy) return;
 
@@ -585,7 +876,15 @@ async function action(
   }
 
   busy = false;
-  await refresh("Applied successfully.");
+  await refresh(successMessage);
+}
+
+function findExtension(id: string): ExtensionManifest | undefined {
+  return registry?.extensions.find((ext) => ext.id === id);
+}
+
+function findProfile(id: string): HostProfile | undefined {
+  return profiles.find((profile) => profile.id === id);
 }
 
 function bindEvents(): void {
@@ -618,14 +917,37 @@ function bindEvents(): void {
     });
 
   document
-    .querySelector<HTMLButtonElement>("#snake-toggle")
-    ?.addEventListener("click", () => {
-      const target = !(status?.overlayEnabled === true);
+    .querySelectorAll<HTMLButtonElement>(".extension-toggle")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.extensionId;
 
-      void action(async () => {
-        await invoke<boolean>("set_overlay_runtime", {
-          enabled: target,
-        });
+        if (!id) return;
+
+        const ext = findExtension(id);
+
+        if (!ext || !ext.activation) {
+          notice = "Extension activation metadata is missing.";
+          render();
+          return;
+        }
+
+        const active = extensionActive(ext);
+        const command = active
+          ? ext.activation.disableCommand
+          : ext.activation.enableCommand;
+
+        if (!command) {
+          notice = "This extension does not expose a safe toggle command.";
+          render();
+          return;
+        }
+
+        void action(async () => {
+          await invoke<string>("run_safe_extension_command", {
+            command,
+          });
+        }, `${ext.name} updated.`);
       });
     });
 
@@ -660,6 +982,87 @@ function bindEvents(): void {
     ?.addEventListener("click", () => {
       void action(async () => {
         await invoke<void>("lcd_home");
+      });
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#profile-save")
+    ?.addEventListener("click", () => {
+      if (!status?.connected) return;
+
+      const suggested = `Profile ${profiles.length + 1}`;
+      const name = window.prompt("Profile name", suggested)?.trim();
+
+      if (!name) return;
+
+      const profile: HostProfile = {
+        id: crypto.randomUUID(),
+        name,
+        rgbEnabled: status.rgbCoreEnabled === true,
+        overlayEnabled: status.overlayEnabled === true,
+        createdAt: new Date().toLocaleString(),
+      };
+
+      profiles = [...profiles, profile];
+      saveProfiles();
+      notice = `Saved ${name}.`;
+      render();
+    });
+
+  document
+    .querySelectorAll<HTMLButtonElement>(".profile-apply")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.profileId;
+
+        if (!id) return;
+
+        const profile = findProfile(id);
+
+        if (!profile) return;
+
+        void action(async () => {
+          if (profile.rgbEnabled) {
+            await invoke<boolean>("set_rgb_core_runtime", {
+              enabled: true,
+            });
+
+            await invoke<boolean>("set_overlay_runtime", {
+              enabled: profile.overlayEnabled,
+            });
+          } else {
+            await invoke<boolean>("set_overlay_runtime", {
+              enabled: profile.overlayEnabled,
+            });
+
+            await invoke<boolean>("set_rgb_core_runtime", {
+              enabled: false,
+            });
+          }
+        }, `Applied ${profile.name}.`);
+      });
+    });
+
+  document
+    .querySelectorAll<HTMLButtonElement>(".profile-delete")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.profileId;
+
+        if (!id) return;
+
+        const profile = findProfile(id);
+
+        if (!profile) return;
+
+        if (!window.confirm(`Delete "${profile.name}"?`)) {
+          return;
+        }
+
+        profiles = profiles.filter((item) => item.id !== id);
+        saveProfiles();
+        notice = `Deleted ${profile.name}.`;
+        render();
       });
     });
 }

@@ -408,6 +408,23 @@ fn set_overlay_runtime(
 }
 
 #[tauri::command]
+fn run_safe_extension_command(
+    command: String,
+) -> Result<String, String> {
+    match command.as_str() {
+        "OVERLAY ON"
+        | "OVERLAY OFF"
+        | "RGB ON"
+        | "RGB OFF"
+        | "LCD HOME" => ipc_request(&command),
+
+        _ => Err(format!(
+            "extension command is not allowed in Manifest V1: {command}"
+        )),
+    }
+}
+
+#[tauri::command]
 fn lcd_home() -> Result<(), String> {
     let response = ipc_request("LCD HOME")?;
 
@@ -450,6 +467,7 @@ pub fn run() {
                 get_capabilities,
                 set_rgb_core_runtime,
                 set_overlay_runtime,
+                run_safe_extension_command,
                 lcd_home,
                 lcd_preview
             ],

@@ -19,7 +19,8 @@
     },
     "id": {
       "type": "string",
-      "minLength": 3
+      "minLength": 3,
+      "pattern": "^[A-Za-z0-9._-]+$"
     },
     "name": {
       "type": "string",
@@ -55,7 +56,15 @@
           "type": "array",
           "uniqueItems": true,
           "items": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "matrix_scan",
+              "rgb_runtime",
+              "overlay",
+              "lcd_osd",
+              "audio_watch",
+              "profiles"
+            ]
           }
         }
       }
@@ -64,8 +73,66 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "ipcCommand": {
+        "enableCommand": {
           "type": "string"
+        },
+        "disableCommand": {
+          "type": "string"
+        },
+        "stateField": {
+          "enum": [
+            "overlayEnabled",
+            "rgbCoreEnabled"
+          ]
+        }
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "runtimeBinding"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "range",
+              "toggle",
+              "select"
+            ]
+          },
+          "runtimeBinding": {
+            "enum": [
+              "unavailable",
+              "future"
+            ]
+          },
+          "min": {
+            "type": "number"
+          },
+          "max": {
+            "type": "number"
+          },
+          "step": {
+            "type": "number"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },

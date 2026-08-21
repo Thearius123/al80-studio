@@ -1,0 +1,32 @@
+{
+  "extensions": [
+    {
+      "activation": {
+        "disableCommand": "OVERLAY OFF",
+        "enableCommand": "OVERLAY ON",
+        "stateField": "overlayEnabled"
+      },
+      "description": "Known AL80 Studio extended-firmware RGB overlay effect.",
+      "id": "dev.al80studio.effect.snake",
+      "kind": "firmware-effect",
+      "name": "Snake",
+      "parameters": [],
+      "requires": {
+        "capabilities": [
+          "rgb_runtime",
+          "overlay"
+        ],
+        "firmwareMode": "extended"
+      },
+      "safety": {
+        "eepromWrite": false,
+        "firmwareFlash": false,
+        "persistentLcdWrite": false
+      },
+      "schemaVersion": 1,
+      "source": "extensions/examples/snake/manifest.json"
+    }
+  ],
+  "generatedBy": "tools/build-extension-registry.py",
+  "schemaVersion": 1
+}

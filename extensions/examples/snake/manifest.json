@@ -12,8 +12,11 @@
     ]
   },
   "activation": {
-    "ipcCommand": "OVERLAY ON"
+    "enableCommand": "OVERLAY ON",
+    "disableCommand": "OVERLAY OFF",
+    "stateField": "overlayEnabled"
   },
+  "parameters": [],
   "safety": {
     "firmwareFlash": false,
     "eepromWrite": false,
