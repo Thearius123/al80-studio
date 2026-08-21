@@ -47,6 +47,12 @@ struct Capabilities {
     audio_watch: bool,
     profiles: bool,
     extension_manifest: String,
+    per_key_rgb: bool,
+    creator_scene: bool,
+    rgb_leds: u32,
+    key_rgb_leds: u32,
+    accent_rgb_leds: u32,
+    creator_scene_state: Option<bool>,
     persistent_write: bool,
     eeprom_write: bool,
     qmk_flash: bool,
@@ -70,6 +76,12 @@ impl Capabilities {
             audio_watch: false,
             profiles: false,
             extension_manifest: "NONE".to_string(),
+            per_key_rgb: false,
+            creator_scene: false,
+            rgb_leds: 0,
+            key_rgb_leds: 0,
+            accent_rgb_leds: 0,
+            creator_scene_state: None,
             persistent_write: false,
             eeprom_write: false,
             qmk_flash: false,
@@ -307,6 +319,18 @@ fn parse_capabilities(
             field(&fields, "extension_manifest")
                 .unwrap_or("NONE")
                 .to_string(),
+        per_key_rgb: parse_yes_no(field(&fields, "per_key_rgb"), "per_key_rgb")?,
+        creator_scene: parse_yes_no(field(&fields, "creator_scene"), "creator_scene")?,
+        rgb_leds: field(&fields, "rgb_leds").unwrap_or("0").parse::<u32>()
+            .map_err(|error| format!("invalid capability rgb_leds: {error}"))?,
+        key_rgb_leds: field(&fields, "key_rgb_leds").unwrap_or("0").parse::<u32>()
+            .map_err(|error| format!("invalid capability key_rgb_leds: {error}"))?,
+        accent_rgb_leds: field(&fields, "accent_rgb_leds").unwrap_or("0").parse::<u32>()
+            .map_err(|error| format!("invalid capability accent_rgb_leds: {error}"))?,
+        creator_scene_state: match field(&fields, "creator_scene_state") {
+            Some(value) => Some(parse_on_off(Some(value), "creator_scene_state")?),
+            None => None,
+        },
         persistent_write: parse_yes_no(
             field(&fields, "persistent_write"),
             "persistent_write",
@@ -425,6 +449,32 @@ fn run_safe_extension_command(
 }
 
 #[tauri::command]
+fn apply_creator_scene(colors: Vec<String>) -> Result<String, String> {
+    if colors.len() != 82 {
+        return Err(format!("Creator Scene requires 82 colors, got {}", colors.len()));
+    }
+    let mut encoded = String::with_capacity(82 * 6);
+    for (index, color) in colors.iter().enumerate() {
+        let normalized = color.trim().trim_start_matches('#');
+        if normalized.len() != 6 || !normalized.bytes().all(|v| v.is_ascii_hexdigit()) {
+            return Err(format!("invalid RGB value at LED {}: {}", index, color));
+        }
+        encoded.push_str(&normalized.to_ascii_lowercase());
+    }
+    ipc_request(&format!("SCENE APPLY {encoded}"))
+}
+
+#[tauri::command]
+fn disable_creator_scene() -> Result<String, String> {
+    ipc_request("SCENE OFF")
+}
+
+#[tauri::command]
+fn get_creator_scene_status() -> Result<String, String> {
+    ipc_request("SCENE STATUS")
+}
+
+#[tauri::command]
 fn lcd_home() -> Result<(), String> {
     let response = ipc_request("LCD HOME")?;
 
@@ -468,6 +518,9 @@ pub fn run() {
                 set_rgb_core_runtime,
                 set_overlay_runtime,
                 run_safe_extension_command,
+                apply_creator_scene,
+                disable_creator_scene,
+                get_creator_scene_status,
                 lcd_home,
                 lcd_preview
             ],

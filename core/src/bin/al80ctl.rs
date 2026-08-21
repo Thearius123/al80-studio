@@ -73,6 +73,9 @@ fn help() {
     println!("  al80ctl audio");
     println!("  al80ctl rgb on|off");
     println!("  al80ctl overlay status|on|off");
+    println!("  al80ctl scene status");
+    println!("  al80ctl scene off");
+    println!("  al80ctl scene solid <RRGGBB>");
     println!("  al80ctl lcd home");
     println!("  al80ctl lcd volume <0-100>");
     println!("  al80ctl lcd mute <0-100>");
@@ -121,6 +124,30 @@ fn build_command(args: &[String]) -> Result<String, String> {
                 "OVERLAY {}",
                 state.to_ascii_uppercase()
             ))
+        }
+
+        [group, state]
+            if group == "scene" && state == "status" =>
+        {
+            Ok("SCENE STATUS".to_string())
+        }
+
+        [group, state]
+            if group == "scene" && state == "off" =>
+        {
+            Ok("SCENE OFF".to_string())
+        }
+
+        [group, mode, raw]
+            if group == "scene" && mode == "solid" =>
+        {
+            let color = raw.trim_start_matches('#').to_ascii_lowercase();
+            if color.len() != 6
+                || !color.bytes().all(|value| value.is_ascii_hexdigit())
+            {
+                return Err("scene solid expects RRGGBB".to_string());
+            }
+            Ok(format!("SCENE APPLY {}", color.repeat(82)))
         }
 
         [group, state]

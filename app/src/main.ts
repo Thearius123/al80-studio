@@ -4,6 +4,7 @@ import "./style.css";
 type View =
   | "dashboard"
   | "effects"
+  | "creator"
   | "rgb"
   | "lcd"
   | "profiles"
@@ -31,6 +32,12 @@ interface Capabilities {
   audioWatch: boolean;
   profiles: boolean;
   extensionManifest: string;
+  perKeyRgb: boolean;
+  creatorScene: boolean;
+  rgbLeds: number;
+  keyRgbLeds: number;
+  accentRgbLeds: number;
+  creatorSceneState: boolean | null;
   persistentWrite: boolean;
   eepromWrite: boolean;
   qmkFlash: boolean;
@@ -92,6 +99,59 @@ interface ExtensionRegistry {
   extensions: ExtensionManifest[];
 }
 
+interface CreatorKey {
+  ledIndex: number;
+  matrix: [number, number];
+  code: string;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rgbX: number;
+  rgbY: number;
+}
+
+interface CreatorAccent {
+  ledIndex: number;
+  label: string;
+  rgbX: number;
+  rgbY: number;
+}
+
+interface CreatorControl {
+  matrix: [number, number];
+  code: string;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  hasRgb: false;
+}
+
+interface CreatorLayout {
+  schemaVersion: 1;
+  device: string;
+  ledCount: 82;
+  keyLedCount: 79;
+  accentLedCount: 3;
+  layoutWidth: number;
+  layoutHeight: number;
+  keys: CreatorKey[];
+  accents: CreatorAccent[];
+  controls: CreatorControl[];
+}
+
+interface SavedCreatorScene {
+  id: string;
+  name: string;
+  colors: string[];
+  createdAt: string;
+}
+
+type CreatorTool = "paint" | "select";
+
 interface HostProfile {
   id: string;
   name: string;
@@ -101,6 +161,7 @@ interface HostProfile {
 }
 
 const PROFILE_KEY = "al80-studio.host-profiles.v1";
+const CREATOR_SCENE_KEY = "al80-studio.creator-scenes.v1";
 
 function requireAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
@@ -118,6 +179,13 @@ let view: View = "dashboard";
 let status: DeviceStatus | null = null;
 let capabilities: Capabilities | null = null;
 let registry: ExtensionRegistry | null = null;
+let creatorLayout: CreatorLayout | null = null;
+let creatorColors: string[] = Array.from({ length: 82 }, () => "#ffffff");
+let creatorPaintColor = "#7c83ff";
+let creatorTool: CreatorTool = "paint";
+let creatorSelected = new Set<number>();
+let creatorHistory: string[][] = [];
+let savedCreatorScenes: SavedCreatorScene[] = loadCreatorScenes();
 let profiles: HostProfile[] = loadProfiles();
 let busy = false;
 let notice = "";
@@ -140,6 +208,85 @@ function onOff(value: boolean | null | undefined): string {
   if (value === true) return "ON";
   if (value === false) return "OFF";
   return "—";
+}
+
+function normalizeHexColor(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : "#000000";
+}
+
+function loadCreatorScenes(): SavedCreatorScene[] {
+  try {
+    const raw = localStorage.getItem(CREATOR_SCENE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is SavedCreatorScene => {
+      if (typeof item !== "object" || item === null) return false;
+      const scene = item as Partial<SavedCreatorScene>;
+      return typeof scene.id === "string"
+        && typeof scene.name === "string"
+        && typeof scene.createdAt === "string"
+        && Array.isArray(scene.colors)
+        && scene.colors.length === 82
+        && scene.colors.every((c) => typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c));
+    }).map((scene) => ({ ...scene, colors: scene.colors.map(normalizeHexColor) }));
+  } catch {
+    return [];
+  }
+}
+
+function saveCreatorScenes(): void {
+  localStorage.setItem(CREATOR_SCENE_KEY, JSON.stringify(savedCreatorScenes));
+}
+
+function creatorSnapshot(): void {
+  creatorHistory.push([...creatorColors]);
+  if (creatorHistory.length > 30) creatorHistory.shift();
+}
+
+function creatorUndo(): void {
+  const previous = creatorHistory.pop();
+  if (!previous) {
+    notice = "Nothing to undo.";
+    render();
+    return;
+  }
+  creatorColors = previous;
+  notice = "Undo.";
+  render();
+}
+
+async function loadCreatorLayout(): Promise<CreatorLayout> {
+  const response = await fetch("./devices/al80/layout.json", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Creator layout failed: HTTP ${response.status}`);
+  const value = (await response.json()) as CreatorLayout;
+  if (value.schemaVersion !== 1 || value.ledCount !== 82 || value.keyLedCount !== 79 || value.accentLedCount !== 3) {
+    throw new Error("Invalid AL80 Creator physical layout");
+  }
+  return value;
+}
+
+function paintCreatorLed(ledIndex: number, color = creatorPaintColor): void {
+  if (!Number.isInteger(ledIndex) || ledIndex < 0 || ledIndex >= 82) return;
+  creatorColors[ledIndex] = normalizeHexColor(color);
+}
+
+function creatorWasdDemo(): void {
+  if (!creatorLayout) return;
+  creatorSnapshot();
+  creatorColors = Array.from({ length: 82 }, () => "#000000");
+  const map = new Map(creatorLayout.keys.map((key) => [key.code, key.ledIndex]));
+  const demo: Array<[string, string]> = [
+    ["KC_W", "#0050ff"], ["KC_A", "#ff0000"], ["KC_S", "#00ff00"], ["KC_D", "#ffbe00"],
+    ["KC_LEFT", "#ff0050"], ["KC_DOWN", "#00ff78"], ["KC_RIGHT", "#008cff"], ["KC_UP", "#ffffff"],
+  ];
+  for (const [code, color] of demo) {
+    const led = map.get(code);
+    if (led !== undefined) paintCreatorLed(led, color);
+  }
+  const accentColors = ["#ff00ff", "#00ffff", "#ff5000"];
+  creatorLayout.accents.forEach((accent, index) => paintCreatorLed(accent.ledIndex, accentColors[index] ?? "#ffffff"));
 }
 
 function loadProfiles(): HostProfile[] {
@@ -491,6 +638,46 @@ function renderEffects(): string {
   `;
 }
 
+function renderCreator(): string {
+  const supported = capabilities?.perKeyRgb === true
+    && capabilities?.creatorScene === true
+    && capabilities?.rgbLeds === 82;
+
+  if (!creatorLayout) {
+    return `<section class="page"><div class="page-heading"><div><p class="eyebrow">Creator Mode</p><h1>Keyboard Painter</h1><p>Loading AL80 physical LED map…</p></div></div></section>`;
+  }
+
+  const width = creatorLayout.layoutWidth;
+  const height = creatorLayout.layoutHeight;
+  const keys = creatorLayout.keys.map((key) => {
+    const color = creatorColors[key.ledIndex] ?? "#000000";
+    const selected = creatorSelected.has(key.ledIndex);
+    return `<button class="creator-key ${selected ? "selected" : ""}" data-creator-led="${key.ledIndex}" title="${esc(`${key.label} · ${key.code} · LED ${key.ledIndex}`)}" type="button" style="left:${(key.x / width) * 100}%;top:${(key.y / height) * 100}%;width:${(key.w / width) * 100}%;height:${(key.h / height) * 100}%;--creator-key-color:${esc(color)}"><span>${esc(key.label)}</span><small>${key.ledIndex}</small></button>`;
+  }).join("");
+
+  const controls = creatorLayout.controls.map((control) => `<div class="creator-key creator-key-no-rgb" title="${esc(`${control.label} · no RGB LED`)}" style="left:${(control.x / width) * 100}%;top:${(control.y / height) * 100}%;width:${(control.w / width) * 100}%;height:${(control.h / height) * 100}%"><span>${esc(control.label)}</span><small>No RGB</small></div>`).join("");
+
+  const accents = creatorLayout.accents.map((accent) => {
+    const color = creatorColors[accent.ledIndex] ?? "#000000";
+    const selected = creatorSelected.has(accent.ledIndex);
+    return `<button class="creator-accent ${selected ? "selected" : ""}" data-creator-led="${accent.ledIndex}" type="button" style="--creator-key-color:${esc(color)}">${esc(accent.label)}<small>LED ${accent.ledIndex}</small></button>`;
+  }).join("");
+
+  const saved = savedCreatorScenes.length
+    ? savedCreatorScenes.map((scene) => `<article class="creator-saved-scene"><div><strong>${esc(scene.name)}</strong><small>${esc(scene.createdAt)}</small></div><div class="profile-actions"><button class="primary-btn creator-scene-load" data-scene-id="${esc(scene.id)}" type="button" ${busy ? "disabled" : ""}>Load</button><button class="secondary-btn creator-scene-delete" data-scene-id="${esc(scene.id)}" type="button" ${busy ? "disabled" : ""}>Delete</button></div></article>`).join("")
+    : `<div class="creator-empty-scenes">No saved scenes yet.</div>`;
+
+  return `<section class="page">
+    <div class="page-heading"><div><p class="eyebrow">Per-key RGB Creator</p><h1>Keyboard Painter</h1><p>Paint any of the 79 key LEDs and 3 accent LEDs. Upload is atomic through the physically validated 0x4A protocol and remains RAM-only.</p></div>${badge(supported ? "Creator Protocol Ready" : "Creator unavailable", supported ? "good" : "warn")}</div>
+    <article class="panel creator-toolbar"><label class="creator-color-control"><span>Color</span><input id="creator-color" type="color" value="${esc(creatorPaintColor)}"/><code>${esc(creatorPaintColor)}</code></label><div class="creator-tool-group"><button class="secondary-btn creator-tool ${creatorTool === "paint" ? "tool-active" : ""}" data-creator-tool="paint" type="button">Paint</button><button class="secondary-btn creator-tool ${creatorTool === "select" ? "tool-active" : ""}" data-creator-tool="select" type="button">Select</button><button id="creator-apply-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Color selected (${creatorSelected.size})</button><button id="creator-clear-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Clear selection</button></div></article>
+    <article class="panel"><div class="creator-actions"><button id="creator-wasd-demo" class="secondary-btn" type="button">WASD demo</button><button id="creator-fill" class="secondary-btn" type="button">Fill all</button><button id="creator-black" class="secondary-btn" type="button">All off</button><button id="creator-white" class="secondary-btn" type="button">All white</button><button id="creator-undo" class="secondary-btn" type="button" ${creatorHistory.length === 0 ? "disabled" : ""}>Undo</button><button id="creator-save" class="secondary-btn" type="button">Save scene</button><button id="creator-apply" class="primary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Apply to keyboard</button><button id="creator-disable" class="secondary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Exit Creator</button></div></article>
+    <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Exact recovered layout</p><h2>79 RGB keys</h2></div>${badge("Click or drag to paint")}</div><div class="creator-board">${keys}${controls}</div></article>
+    <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Decorative zones</p><h2>Accent LEDs</h2></div>${badge("LED 76 / 77 / 78")}</div><div class="creator-accent-row">${accents}</div></article>
+    <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Local library</p><h2>Saved scenes</h2></div>${badge(`${savedCreatorScenes.length} saved`)}</div><div class="creator-scene-library">${saved}</div></article>
+    <article class="panel"><p class="muted">Creator Scene temporarily takes priority over Snake. Exit Creator to return to Snake/normal RGB. Low-battery red indication remains highest priority.</p></article>
+  </section>`;
+}
+
 function renderRgb(): string {
   const supported = capabilities?.rgbRuntime === true;
   const enabled = status?.rgbCoreEnabled === true;
@@ -769,6 +956,8 @@ function renderPage(): string {
   switch (view) {
     case "effects":
       return renderEffects();
+    case "creator":
+      return renderCreator();
     case "rgb":
       return renderRgb();
     case "lcd":
@@ -799,6 +988,7 @@ function render(): void {
         <nav class="nav">
           ${navButton("dashboard", "Dashboard")}
           ${navButton("effects", "Effects")}
+          ${navButton("creator", "Creator")}
           ${navButton("rgb", "RGB")}
           ${navButton("lcd", "LCD")}
           ${navButton("profiles", "Profiles")}
@@ -833,16 +1023,19 @@ function render(): void {
 
 async function refresh(message = ""): Promise<void> {
   try {
-    const [nextStatus, nextCaps, nextRegistry] = await Promise.all([
+    const [nextStatus, nextCaps, nextRegistry, nextCreatorLayout] = await Promise.all([
       invoke<DeviceStatus>("get_device_status"),
       invoke<Capabilities>("get_capabilities"),
       loadRegistry(),
+      loadCreatorLayout(),
     ]);
 
     status = nextStatus;
     capabilities = nextCaps;
     registry = nextRegistry;
+    creatorLayout = nextCreatorLayout;
     profiles = loadProfiles();
+    savedCreatorScenes = loadCreatorScenes();
 
     notice =
       message ||
@@ -903,6 +1096,142 @@ function bindEvents(): void {
     ?.addEventListener("click", () => {
       void refresh("Refreshed.");
     });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-color")
+    ?.addEventListener("input", (event) => {
+      creatorPaintColor = normalizeHexColor((event.currentTarget as HTMLInputElement).value);
+      render();
+    });
+
+  document.querySelectorAll<HTMLButtonElement>(".creator-tool").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tool = button.dataset.creatorTool;
+      if (tool === "paint" || tool === "select") {
+        creatorTool = tool;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-creator-led]").forEach((button) => {
+    const interact = (snapshot: boolean) => {
+      const raw = button.dataset.creatorLed;
+      if (!raw) return;
+      const led = Number(raw);
+      if (!Number.isInteger(led) || led < 0 || led >= 82) return;
+      if (creatorTool === "select") {
+        if (creatorSelected.has(led)) creatorSelected.delete(led);
+        else creatorSelected.add(led);
+        render();
+        return;
+      }
+      if (snapshot) creatorSnapshot();
+      paintCreatorLed(led);
+      render();
+    };
+
+    button.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      interact(true);
+    });
+    button.addEventListener("pointerenter", (event) => {
+      if (creatorTool !== "paint" || (event.buttons & 1) !== 1) return;
+      interact(false);
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-apply-selection")?.addEventListener("click", () => {
+    if (creatorSelected.size === 0) return;
+    creatorSnapshot();
+    creatorSelected.forEach((led) => paintCreatorLed(led));
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-clear-selection")?.addEventListener("click", () => {
+    creatorSelected.clear();
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-wasd-demo")?.addEventListener("click", () => {
+    creatorWasdDemo();
+    notice = "WASD demonstration loaded locally.";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-fill")?.addEventListener("click", () => {
+    creatorSnapshot();
+    creatorColors = Array.from({ length: 82 }, () => creatorPaintColor);
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-black")?.addEventListener("click", () => {
+    creatorSnapshot();
+    creatorColors = Array.from({ length: 82 }, () => "#000000");
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-white")?.addEventListener("click", () => {
+    creatorSnapshot();
+    creatorColors = Array.from({ length: 82 }, () => "#ffffff");
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-undo")?.addEventListener("click", creatorUndo);
+
+  document.querySelector<HTMLButtonElement>("#creator-save")?.addEventListener("click", () => {
+    const suggested = `Scene ${savedCreatorScenes.length + 1}`;
+    const name = window.prompt("Scene name", suggested)?.trim();
+    if (!name) return;
+    savedCreatorScenes = [...savedCreatorScenes, {
+      id: crypto.randomUUID(),
+      name,
+      colors: [...creatorColors],
+      createdAt: new Date().toLocaleString(),
+    }];
+    saveCreatorScenes();
+    notice = `Saved ${name}.`;
+    render();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".creator-scene-load").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.sceneId;
+      if (!id) return;
+      const scene = savedCreatorScenes.find((item) => item.id === id);
+      if (!scene) return;
+      creatorSnapshot();
+      creatorColors = scene.colors.map(normalizeHexColor);
+      notice = `Loaded ${scene.name}.`;
+      render();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".creator-scene-delete").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.sceneId;
+      if (!id) return;
+      const scene = savedCreatorScenes.find((item) => item.id === id);
+      if (!scene || !window.confirm(`Delete "${scene.name}"?`)) return;
+      savedCreatorScenes = savedCreatorScenes.filter((item) => item.id !== id);
+      saveCreatorScenes();
+      notice = `Deleted ${scene.name}.`;
+      render();
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-apply")?.addEventListener("click", () => {
+    void action(async () => {
+      await invoke<string>("apply_creator_scene", { colors: creatorColors });
+    }, "Creator Scene applied to keyboard.");
+  });
+
+  document.querySelector<HTMLButtonElement>("#creator-disable")?.addEventListener("click", () => {
+    void action(async () => {
+      await invoke<string>("disable_creator_scene");
+    }, "Creator Scene disabled; normal effects restored.");
+  });
 
   document
     .querySelector<HTMLButtonElement>("#rgb-toggle")

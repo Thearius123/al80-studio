@@ -205,10 +205,11 @@ fn capabilities_line(
         let scan = device.scan_rate_hz()?;
         let rgb = device.rgb_core_enabled()?;
         let overlay = device.overlay_status()?;
+        let creator = device.creator_scene_status()?;
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.1.1 ",
+                "OK api=1 daemon=0.2.0 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -217,6 +218,12 @@ fn capabilities_line(
                 "audio_watch=YES ",
                 "profiles=NO ",
                 "extension_manifest=V1 ",
+                "per_key_rgb=YES ",
+                "creator_scene=YES ",
+                "rgb_leds=82 ",
+                "key_rgb_leds=79 ",
+                "accent_rgb_leds=3 ",
+                "creator_scene_state={} ",
                 "persistent_write=NO ",
                 "eeprom_write=NO ",
                 "qmk_flash=NO ",
@@ -225,12 +232,72 @@ fn capabilities_line(
                 "overlay_state={} ",
                 "overlay_rgb_state={}"
             ),
+            if creator.enabled { "ON" } else { "OFF" },
             scan,
             if rgb { "ON" } else { "OFF" },
             if overlay.enabled { "ON" } else { "OFF" },
             if overlay.rgb_core_enabled { "ON" } else { "OFF" },
         ))
     })
+}
+
+fn decode_creator_scene_hex(
+    raw: &str,
+) -> Result<Vec<[u8; 3]>, String> {
+    const LEDS: usize = 82;
+    const HEX_PER_LED: usize = 6;
+    const EXPECTED: usize = LEDS * HEX_PER_LED;
+
+    if !raw.is_ascii() {
+        return Err(
+            "Creator Scene payload must be ASCII hex"
+                .to_string()
+        );
+    }
+
+    if raw.len() != EXPECTED {
+        return Err(format!(
+            concat!(
+                "Creator Scene payload must contain ",
+                "{} hex characters, got {}"
+            ),
+            EXPECTED,
+            raw.len()
+        ));
+    }
+
+    if !raw
+        .bytes()
+        .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(
+            "Creator Scene payload contains non-hex data"
+                .to_string()
+        );
+    }
+
+    let mut colors = Vec::with_capacity(LEDS);
+
+    for index in 0..LEDS {
+        let start = index * HEX_PER_LED;
+        let chunk = &raw[start..start + HEX_PER_LED];
+
+        let value = u32::from_str_radix(chunk, 16)
+            .map_err(|_| {
+                format!(
+                    "invalid RGB hex at Creator LED {}",
+                    index
+                )
+            })?;
+
+        colors.push([
+            ((value >> 16) & 0xFF) as u8,
+            ((value >> 8) & 0xFF) as u8,
+            (value & 0xFF) as u8,
+        ]);
+    }
+
+    Ok(colors)
 }
 
 fn parse_percent(value: Option<&str>) -> Result<u8, String> {
@@ -308,6 +375,56 @@ fn handle_request(
                 "OK overlay={} rgb={}",
                 if state.enabled { "ON" } else { "OFF" },
                 if state.rgb_core_enabled { "ON" } else { "OFF" },
+            ))
+        }
+
+        ["SCENE", "STATUS"] => {
+            let mut owner = lock_device(shared)?;
+
+            let state = owner.operation(
+                |device| device.creator_scene_status()
+            )?;
+
+            Ok(format!(
+                "OK scene={} rgb={} leds={} chunk={}",
+                if state.enabled { "ON" } else { "OFF" },
+                if state.rgb_core_enabled { "ON" } else { "OFF" },
+                state.led_count,
+                state.chunk_max,
+            ))
+        }
+
+        ["SCENE", "OFF"] => {
+            let mut owner = lock_device(shared)?;
+
+            let state = owner.operation(
+                |device| device.creator_scene_disable()
+            )?;
+
+            Ok(format!(
+                "OK scene={} rgb={}",
+                if state.enabled { "ON" } else { "OFF" },
+                if state.rgb_core_enabled { "ON" } else { "OFF" },
+            ))
+        }
+
+        ["SCENE", "APPLY", raw] => {
+            let colors =
+                decode_creator_scene_hex(raw)?;
+
+            let mut owner = lock_device(shared)?;
+
+            let state = owner.operation(
+                |device| {
+                    device.creator_scene_apply(&colors)
+                }
+            )?;
+
+            Ok(format!(
+                "OK scene={} rgb={} leds={}",
+                if state.enabled { "ON" } else { "OFF" },
+                if state.rgb_core_enabled { "ON" } else { "OFF" },
+                state.led_count,
             ))
         }
 
@@ -611,7 +728,7 @@ fn run_audio_session(
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.1.1");
+    println!("AL80D_VERSION=0.2.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");

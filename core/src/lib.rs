@@ -11,6 +11,10 @@ pub const PID: &str = "30af";
 pub const CMD_SCAN_RATE: u8 = 0x47;
 pub const CMD_RGB_CORE: u8 = 0x48;
 pub const CMD_OVERLAY: u8 = 0x49;
+pub const CMD_CREATOR_SCENE: u8 = 0x4A;
+
+pub const CREATOR_LED_COUNT: usize = 82;
+pub const CREATOR_CHUNK_MAX: usize = 9;
 
 pub const STATUS_OK: u8 = 0x55;
 
@@ -27,6 +31,14 @@ pub struct DeviceInfo {
 pub struct OverlayStatus {
     pub enabled: bool,
     pub rgb_core_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CreatorSceneStatus {
+    pub enabled: bool,
+    pub rgb_core_enabled: bool,
+    pub led_count: u8,
+    pub chunk_max: u8,
 }
 
 pub struct Al80 {
@@ -443,6 +455,150 @@ impl Al80 {
         }
 
         Ok(payload[2] != 0)
+    }
+
+    fn creator_scene_command(
+        &mut self,
+        payload: &[u8; REPORT_BYTES],
+    ) -> Result<Vec<u8>, String> {
+        let (response, _) = self.transact_raw32(
+            payload,
+            Duration::from_millis(800),
+        )?;
+
+        let normalized: &[u8] =
+            if response.len() >= LINUX_WRITE_BYTES && response[0] == 0 {
+                &response[1..usize::min(LINUX_WRITE_BYTES, response.len())]
+            } else {
+                &response[0..usize::min(REPORT_BYTES, response.len())]
+            };
+
+        if normalized.len() < 2 {
+            return Err("0x4A response too short".to_string());
+        }
+
+        if normalized[0] != CMD_CREATOR_SCENE {
+            return Err(format!(
+                "unexpected Creator Scene response command 0x{:02X}",
+                normalized[0]
+            ));
+        }
+
+        if normalized[1] != STATUS_OK {
+            return Err(format!(
+                "0x4A returned status 0x{:02X}",
+                normalized[1]
+            ));
+        }
+
+        Ok(normalized.to_vec())
+    }
+
+    pub fn creator_scene_status(
+        &mut self,
+    ) -> Result<CreatorSceneStatus, String> {
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = CMD_CREATOR_SCENE;
+        payload[1] = 0;
+        let response = self.creator_scene_command(&payload)?;
+
+        if response.len() < 9 {
+            return Err("0x4A query response too short".to_string());
+        }
+        if response[3] as usize != CREATOR_LED_COUNT {
+            return Err(format!(
+                "0x4A reports unexpected LED count {}",
+                response[3]
+            ));
+        }
+        if response[4] as usize != CREATOR_CHUNK_MAX {
+            return Err(format!(
+                "0x4A reports unexpected chunk size {}",
+                response[4]
+            ));
+        }
+
+        Ok(CreatorSceneStatus {
+            enabled: response[2] != 0,
+            led_count: response[3],
+            chunk_max: response[4],
+            rgb_core_enabled: response[8] != 0,
+        })
+    }
+
+    pub fn creator_scene_disable(
+        &mut self,
+    ) -> Result<CreatorSceneStatus, String> {
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = CMD_CREATOR_SCENE;
+        payload[1] = 1;
+        let response = self.creator_scene_command(&payload)?;
+        if response.len() < 3 || response[2] != 0 {
+            return Err("Creator Scene disable ACK invalid".to_string());
+        }
+        self.creator_scene_status()
+    }
+
+    pub fn creator_scene_apply(
+        &mut self,
+        colors: &[[u8; 3]],
+    ) -> Result<CreatorSceneStatus, String> {
+        if colors.len() != CREATOR_LED_COUNT {
+            return Err(format!(
+                "Creator Scene requires exactly {} RGB values, got {}",
+                CREATOR_LED_COUNT,
+                colors.len()
+            ));
+        }
+
+        self.set_rgb_core(true)?;
+
+        let mut clear = [0u8; REPORT_BYTES];
+        clear[0] = CMD_CREATOR_SCENE;
+        clear[1] = 2;
+        self.creator_scene_command(&clear)?;
+
+        for start in (0..CREATOR_LED_COUNT).step_by(CREATOR_CHUNK_MAX) {
+            let count = usize::min(
+                CREATOR_CHUNK_MAX,
+                CREATOR_LED_COUNT - start,
+            );
+            let mut payload = [0u8; REPORT_BYTES];
+            payload[0] = CMD_CREATOR_SCENE;
+            payload[1] = 3;
+            payload[2] = start as u8;
+            payload[3] = count as u8;
+
+            for offset in 0..count {
+                let target = 4 + offset * 3;
+                let color = colors[start + offset];
+                payload[target] = color[0];
+                payload[target + 1] = color[1];
+                payload[target + 2] = color[2];
+            }
+
+            let response = self.creator_scene_command(&payload)?;
+            if response.len() < 8
+                || response[6] != start as u8
+                || response[7] != count as u8
+            {
+                return Err(format!(
+                    "Creator Scene chunk ACK mismatch at LED {}",
+                    start
+                ));
+            }
+        }
+
+        let mut commit = [0u8; REPORT_BYTES];
+        commit[0] = CMD_CREATOR_SCENE;
+        commit[1] = 4;
+        let response = self.creator_scene_command(&commit)?;
+
+        if response.len() < 3 || response[2] == 0 {
+            return Err("Creator Scene commit did not enable scene".to_string());
+        }
+
+        self.creator_scene_status()
     }
 
     pub fn overlay_status(
