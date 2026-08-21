@@ -109,3 +109,28 @@ The daemon foundation does not add:
 - QMK source modification.
 
 RGB, overlay and LCD OSD operations remain volatile.
+
+## Transient hidraw recovery
+
+`al80d` keeps a long-lived Raw HID file descriptor so the daemon remains the
+single device owner.
+
+On Linux that descriptor can become stale after USB re-enumeration,
+suspend/resume, controller reset, or another transient device event. The
+result can be an I/O error even while the keyboard remains connected.
+
+Recovery policy:
+
+1. the transaction fails;
+2. the cached `Al80` handle is discarded;
+3. device discovery/open runs again;
+4. the same transaction is retried once;
+5. success continues without failing the first client request;
+6. a second failure is returned and the handle stays cleared.
+
+Observability:
+
+```text
+AL80D_TRANSACTION_RETRY=YES
+AL80D_TRANSACTION_RECOVERY=PASS
+```

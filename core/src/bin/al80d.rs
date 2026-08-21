@@ -46,18 +46,66 @@ impl DeviceOwner {
 
     fn operation<T>(
         &mut self,
-        f: impl FnOnce(&mut Al80) -> Result<T, String>,
+        mut f: impl FnMut(&mut Al80) -> Result<T, String>,
     ) -> Result<T, String> {
-        let result = {
+        let first_result = {
             let device = self.ensure_connected()?;
             f(device)
         };
 
-        if result.is_err() {
-            self.device = None;
-        }
+        match first_result {
+            Ok(value) => Ok(value),
 
-        result
+            Err(first_error) => {
+                // A long-lived Linux hidraw file descriptor can become stale
+                // after USB reset, suspend/resume or device re-enumeration.
+                //
+                // Existing daemon operations are explicit idempotent runtime
+                // controls or reads, so one reconnect-and-retry is safe.
+                self.device = None;
+
+                eprintln!(
+                    "AL80D_TRANSACTION_RETRY=YES FIRST_ERROR={first_error}"
+                );
+
+                let retry_result = {
+                    let device = self.ensure_connected().map_err(
+                        |reconnect_error| {
+                            format!(
+                                concat!(
+                                    "AL80 reconnect failed after transaction ",
+                                    "error: first={}; reconnect={}"
+                                ),
+                                first_error,
+                                reconnect_error
+                            )
+                        },
+                    )?;
+
+                    f(device)
+                };
+
+                match retry_result {
+                    Ok(value) => {
+                        println!("AL80D_TRANSACTION_RECOVERY=PASS");
+                        Ok(value)
+                    }
+
+                    Err(retry_error) => {
+                        self.device = None;
+
+                        Err(format!(
+                            concat!(
+                                "AL80 transaction failed after reconnect: ",
+                                "first={}; retry={}"
+                            ),
+                            first_error,
+                            retry_error
+                        ))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -160,7 +208,7 @@ fn capabilities_line(
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.1.0 ",
+                "OK api=1 daemon=0.1.1 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -563,7 +611,7 @@ fn run_audio_session(
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.1.0");
+    println!("AL80D_VERSION=0.1.1");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");
