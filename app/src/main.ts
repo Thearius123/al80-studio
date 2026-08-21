@@ -40,7 +40,7 @@ app.innerHTML = `
           Keyboard
         </button>
 
-        <button class="nav-item" disabled>
+        <button id="nav-rgb" class="nav-item">
           <span>✦</span>
           RGB
         </button>
@@ -209,6 +209,37 @@ app.innerHTML = `
         </article>
       </section>
 
+      <section id="rgb-controls" class="control-panel">
+        <div class="control-copy">
+          <div class="section-eyebrow">
+            RGB RUNTIME CONTROL
+          </div>
+          <h2>Lighting engine</h2>
+          <p>
+            Toggle the AL80 RGB core at runtime. This command is
+            volatile and does not write RGB state to EEPROM.
+          </p>
+        </div>
+
+        <div class="control-action">
+          <div id="rgb-control-state" class="control-state">
+            Waiting for keyboard
+          </div>
+
+          <button
+            id="rgb-toggle"
+            class="runtime-toggle"
+            disabled
+          >
+            Loading…
+          </button>
+
+          <div class="volatile-note">
+            VOLATILE · NO EEPROM WRITE
+          </div>
+        </div>
+      </section>
+
       <section class="status-panel">
         <div class="panel-title-row">
           <div>
@@ -295,6 +326,17 @@ const lastUpdated =
 const errorBox =
   document.querySelector<HTMLDivElement>("#error-box");
 
+const navRgb =
+  document.querySelector<HTMLButtonElement>("#nav-rgb");
+const rgbControls =
+  document.querySelector<HTMLElement>("#rgb-controls");
+const rgbToggle =
+  document.querySelector<HTMLButtonElement>("#rgb-toggle");
+const rgbControlState =
+  document.querySelector<HTMLDivElement>("#rgb-control-state");
+
+let currentRgbState: boolean | null = null;
+
 function boolLabel(value: boolean | null): string {
   if (value === true) return "ON";
   if (value === false) return "OFF";
@@ -349,6 +391,39 @@ function render(status: DeviceStatus): void {
       boolLabel(status.rgbCoreEnabled);
 
     rgbValue.dataset.state =
+      status.rgbCoreEnabled === true
+        ? "on"
+        : status.rgbCoreEnabled === false
+          ? "off"
+          : "unknown";
+  }
+
+  currentRgbState = status.rgbCoreEnabled;
+
+  if (rgbControlState) {
+    rgbControlState.textContent =
+      status.rgbCoreEnabled === true
+        ? "RGB engine is ON"
+        : status.rgbCoreEnabled === false
+          ? "RGB engine is OFF"
+          : "RGB state unavailable";
+  }
+
+  if (rgbToggle) {
+    const usable =
+      status.connected
+      && status.rgbCoreEnabled !== null;
+
+    rgbToggle.disabled = !usable;
+
+    rgbToggle.textContent =
+      status.rgbCoreEnabled === true
+        ? "Turn RGB off"
+        : status.rgbCoreEnabled === false
+          ? "Turn RGB on"
+          : "Unavailable";
+
+    rgbToggle.dataset.state =
       status.rgbCoreEnabled === true
         ? "on"
         : status.rgbCoreEnabled === false
@@ -432,6 +507,55 @@ refresh?.addEventListener(
   "click",
   () => {
     void loadStatus();
+  },
+);
+
+navRgb?.addEventListener(
+  "click",
+  () => {
+    rgbControls?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  },
+);
+
+rgbToggle?.addEventListener(
+  "click",
+  async () => {
+    if (currentRgbState === null) {
+      return;
+    }
+
+    const wanted = !currentRgbState;
+
+    rgbToggle.disabled = true;
+    rgbToggle.textContent =
+      wanted
+        ? "Turning on…"
+        : "Turning off…";
+
+    try {
+      const actual =
+        await invoke<boolean>(
+          "set_rgb_core_runtime",
+          {
+            enabled: wanted,
+          },
+        );
+
+      currentRgbState = actual;
+
+      await loadStatus();
+    } catch (error) {
+      if (errorBox) {
+        errorBox.textContent =
+          `RGB runtime command failed: ${String(error)}`;
+        errorBox.classList.remove("hidden");
+      }
+
+      await loadStatus();
+    }
   },
 );
 

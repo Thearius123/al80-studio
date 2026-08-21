@@ -80,12 +80,19 @@ fn get_device_status() -> DeviceStatus {
     }
 }
 
+#[tauri::command]
+fn set_rgb_core_runtime(enabled: bool) -> Result<bool, String> {
+    let mut device = Al80::connect()?;
+    device.set_rgb_core(enabled)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(
             tauri::generate_handler![
-                get_device_status
+                get_device_status,
+                set_rgb_core_runtime
             ],
         )
         .run(
