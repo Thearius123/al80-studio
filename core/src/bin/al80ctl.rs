@@ -16,39 +16,27 @@ fn socket_path() -> PathBuf {
 fn request(command: &str) -> Result<String, String> {
     let path = socket_path();
 
-    let mut stream = UnixStream::connect(&path).map_err(|error| {
-        format!(
-            "cannot connect to al80d at {}: {error}",
-            path.display()
-        )
-    })?;
+    let mut stream = UnixStream::connect(&path)
+        .map_err(|error| format!("cannot connect to al80d at {}: {error}", path.display()))?;
 
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|error| {
-            format!("cannot set read timeout: {error}")
-        })?;
+        .map_err(|error| format!("cannot set read timeout: {error}"))?;
 
     stream
         .set_write_timeout(Some(Duration::from_secs(3)))
-        .map_err(|error| {
-            format!("cannot set write timeout: {error}")
-        })?;
+        .map_err(|error| format!("cannot set write timeout: {error}"))?;
 
-    writeln!(stream, "{command}").map_err(|error| {
-        format!("cannot write request: {error}")
-    })?;
+    writeln!(stream, "{command}").map_err(|error| format!("cannot write request: {error}"))?;
 
-    stream.flush().map_err(|error| {
-        format!("cannot flush request: {error}")
-    })?;
+    stream
+        .flush()
+        .map_err(|error| format!("cannot flush request: {error}"))?;
 
     let mut response = String::new();
     BufReader::new(stream)
         .read_line(&mut response)
-        .map_err(|error| {
-            format!("cannot read response: {error}")
-        })?;
+        .map_err(|error| format!("cannot read response: {error}"))?;
 
     let response = response.trim().to_string();
 
@@ -76,6 +64,11 @@ fn help() {
     println!("  al80ctl scene status");
     println!("  al80ctl scene off");
     println!("  al80ctl scene solid <RRGGBB>");
+    println!("  al80ctl input status");
+    println!("  al80ctl input dump");
+    println!("  al80ctl input off");
+    println!("  al80ctl input defaults");
+    println!("  al80ctl input apply <event,trigger,a,b,action;...>");
     println!("  al80ctl lcd home");
     println!("  al80ctl lcd volume <0-100>");
     println!("  al80ctl lcd mute <0-100>");
@@ -87,9 +80,7 @@ fn percent(raw: &str) -> Result<u8, String> {
         .map_err(|_| format!("invalid percent: {raw}"))?;
 
     if value > 100 {
-        return Err(
-            "percent must be between 0 and 100".to_string()
-        );
+        return Err("percent must be between 0 and 100".to_string());
     }
 
     Ok(value)
@@ -99,74 +90,54 @@ fn build_command(args: &[String]) -> Result<String, String> {
     match args {
         [cmd] if cmd == "ping" => Ok("PING".to_string()),
         [cmd] if cmd == "status" => Ok("STATUS".to_string()),
-        [cmd] if cmd == "capabilities" => {
-            Ok("CAPABILITIES".to_string())
-        }
-        [cmd] if cmd == "audio" => {
-            Ok("AUDIO CURRENT".to_string())
-        }
+        [cmd] if cmd == "capabilities" => Ok("CAPABILITIES".to_string()),
+        [cmd] if cmd == "audio" => Ok("AUDIO CURRENT".to_string()),
 
-        [group, state]
-            if group == "rgb"
-                && (state == "on" || state == "off") =>
-        {
+        [group, state] if group == "rgb" && (state == "on" || state == "off") => {
             Ok(format!("RGB {}", state.to_ascii_uppercase()))
         }
 
         [group, state]
-            if group == "overlay"
-                && matches!(
-                    state.as_str(),
-                    "status" | "on" | "off"
-                ) =>
+            if group == "overlay" && matches!(state.as_str(), "status" | "on" | "off") =>
         {
-            Ok(format!(
-                "OVERLAY {}",
-                state.to_ascii_uppercase()
-            ))
+            Ok(format!("OVERLAY {}", state.to_ascii_uppercase()))
         }
 
-        [group, state]
-            if group == "scene" && state == "status" =>
-        {
-            Ok("SCENE STATUS".to_string())
+        [group, state] if group == "input" && state == "status" => Ok("INPUT STATUS".to_string()),
+
+        [group, state] if group == "input" && state == "dump" => Ok("INPUT DUMP".to_string()),
+
+        [group, state] if group == "input" && state == "off" => Ok("INPUT OFF".to_string()),
+
+        [group, state] if group == "input" && state == "defaults" => {
+            Ok("INPUT DEFAULTS".to_string())
         }
 
-        [group, state]
-            if group == "scene" && state == "off" =>
-        {
-            Ok("SCENE OFF".to_string())
+        [group, mode, raw] if group == "input" && mode == "apply" => {
+            if raw.trim().is_empty() {
+                return Err("input apply requires a binding spec".to_string());
+            }
+            Ok(format!("INPUT APPLY {raw}"))
         }
 
-        [group, mode, raw]
-            if group == "scene" && mode == "solid" =>
-        {
+        [group, state] if group == "scene" && state == "status" => Ok("SCENE STATUS".to_string()),
+
+        [group, state] if group == "scene" && state == "off" => Ok("SCENE OFF".to_string()),
+
+        [group, mode, raw] if group == "scene" && mode == "solid" => {
             let color = raw.trim_start_matches('#').to_ascii_lowercase();
-            if color.len() != 6
-                || !color.bytes().all(|value| value.is_ascii_hexdigit())
-            {
+            if color.len() != 6 || !color.bytes().all(|value| value.is_ascii_hexdigit()) {
                 return Err("scene solid expects RRGGBB".to_string());
             }
             Ok(format!("SCENE APPLY {}", color.repeat(82)))
         }
 
-        [group, state]
-            if group == "lcd" && state == "home" =>
-        {
-            Ok("LCD HOME".to_string())
-        }
+        [group, state] if group == "lcd" && state == "home" => Ok("LCD HOME".to_string()),
 
-        [group, mode, raw]
-            if group == "lcd"
-                && (mode == "volume" || mode == "mute") =>
-        {
+        [group, mode, raw] if group == "lcd" && (mode == "volume" || mode == "mute") => {
             let value = percent(raw)?;
 
-            Ok(format!(
-                "LCD {} {}",
-                mode.to_ascii_uppercase(),
-                value
-            ))
+            Ok(format!("LCD {} {}", mode.to_ascii_uppercase(), value))
         }
 
         _ => Err("invalid command; run al80ctl help".to_string()),

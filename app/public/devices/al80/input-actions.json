@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "protocol": "0x4B",
+  "maxBindings": 12,
+  "actions": [
+    {"id": 0, "key": "none", "label": "None", "category": "General", "description": "Consume the matched input without another action."},
+    {"id": 1, "key": "volume-down", "label": "Volume Down", "category": "Media", "description": "Decrease host audio volume."},
+    {"id": 2, "key": "volume-up", "label": "Volume Up", "category": "Media", "description": "Increase host audio volume."},
+    {"id": 3, "key": "mute", "label": "Mute / Unmute", "category": "Media", "description": "Toggle host audio mute."},
+    {"id": 4, "key": "media-previous", "label": "Previous Track", "category": "Media", "description": "Send previous-track consumer control."},
+    {"id": 5, "key": "media-next", "label": "Next Track", "category": "Media", "description": "Send next-track consumer control."},
+    {"id": 6, "key": "media-play-pause", "label": "Play / Pause", "category": "Media", "description": "Toggle media playback."},
+    {"id": 7, "key": "brightness-down", "label": "Screen Brightness Down", "category": "System", "description": "Send display-brightness-down consumer control."},
+    {"id": 8, "key": "brightness-up", "label": "Screen Brightness Up", "category": "System", "description": "Send display-brightness-up consumer control."},
+    {"id": 9, "key": "left", "label": "Arrow Left", "category": "Navigation", "description": "Send Left Arrow."},
+    {"id": 10, "key": "right", "label": "Arrow Right", "category": "Navigation", "description": "Send Right Arrow."},
+    {"id": 11, "key": "up", "label": "Arrow Up", "category": "Navigation", "description": "Send Up Arrow."},
+    {"id": 12, "key": "down", "label": "Arrow Down", "category": "Navigation", "description": "Send Down Arrow."},
+    {"id": 13, "key": "page-up", "label": "Page Up", "category": "Navigation", "description": "Send Page Up."},
+    {"id": 14, "key": "page-down", "label": "Page Down", "category": "Navigation", "description": "Send Page Down."},
+    {"id": 15, "key": "rgb-value-down", "label": "RGB Brightness Down", "category": "RGB", "description": "Decrease RGB value using QMK no-EEPROM runtime control."},
+    {"id": 16, "key": "rgb-value-up", "label": "RGB Brightness Up", "category": "RGB", "description": "Increase RGB value using QMK no-EEPROM runtime control."},
+    {"id": 17, "key": "rgb-hue-down", "label": "RGB Hue Down", "category": "RGB", "description": "Decrease RGB hue using volatile runtime control."},
+    {"id": 18, "key": "rgb-hue-up", "label": "RGB Hue Up", "category": "RGB", "description": "Increase RGB hue using volatile runtime control."},
+    {"id": 19, "key": "rgb-speed-down", "label": "RGB Speed Down", "category": "RGB", "description": "Decrease RGB animation speed using volatile runtime control."},
+    {"id": 20, "key": "rgb-speed-up", "label": "RGB Speed Up", "category": "RGB", "description": "Increase RGB animation speed using volatile runtime control."},
+    {"id": 21, "key": "snake-off", "label": "Snake Off", "category": "Effects", "description": "Disable the validated Snake overlay."},
+    {"id": 22, "key": "snake-on", "label": "Snake On", "category": "Effects", "description": "Enable the validated Snake overlay."},
+    {"id": 23, "key": "snake-toggle", "label": "Toggle Snake", "category": "Effects", "description": "Toggle the validated Snake overlay."},
+    {"id": 24, "key": "creator-scene-off", "label": "Exit Creator Scene", "category": "Creator", "description": "Disable the active Creator per-key scene and reveal normal effects."}
+  ]
+}

@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +53,10 @@ struct Capabilities {
     key_rgb_leds: u32,
     accent_rgb_leds: u32,
     creator_scene_state: Option<bool>,
+    input_router: bool,
+    input_bindings: u32,
+    input_actions: u32,
+    input_router_state: Option<bool>,
     persistent_write: bool,
     eeprom_write: bool,
     qmk_flash: bool,
@@ -82,6 +86,10 @@ impl Capabilities {
             key_rgb_leds: 0,
             accent_rgb_leds: 0,
             creator_scene_state: None,
+            input_router: false,
+            input_bindings: 0,
+            input_actions: 0,
+            input_router_state: None,
             persistent_write: false,
             eeprom_write: false,
             qmk_flash: false,
@@ -106,39 +114,30 @@ fn socket_path() -> PathBuf {
 fn ipc_request(request: &str) -> Result<String, String> {
     let path = socket_path();
 
-    let mut stream = UnixStream::connect(&path).map_err(|error| {
-        format!(
-            "cannot connect to al80d at {}: {error}",
-            path.display()
-        )
-    })?;
+    let mut stream = UnixStream::connect(&path)
+        .map_err(|error| format!("cannot connect to al80d at {}: {error}", path.display()))?;
 
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| {
-            format!("cannot configure al80d read timeout: {error}")
-        })?;
+        .map_err(|error| format!("cannot configure al80d read timeout: {error}"))?;
 
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| {
-            format!("cannot configure al80d write timeout: {error}")
-        })?;
+        .map_err(|error| format!("cannot configure al80d write timeout: {error}"))?;
 
-    writeln!(stream, "{request}").map_err(|error| {
-        format!("cannot write al80d request: {error}")
-    })?;
+    writeln!(stream, "{request}")
+        .map_err(|error| format!("cannot write al80d request: {error}"))?;
 
-    stream.flush().map_err(|error| {
-        format!("cannot flush al80d request: {error}")
-    })?;
+    stream
+        .flush()
+        .map_err(|error| format!("cannot flush al80d request: {error}"))?;
 
     let mut response = String::new();
     let mut reader = BufReader::new(stream);
 
-    reader.read_line(&mut response).map_err(|error| {
-        format!("cannot read al80d response: {error}")
-    })?;
+    reader
+        .read_line(&mut response)
+        .map_err(|error| format!("cannot read al80d response: {error}"))?;
 
     let response = response.trim().to_string();
 
@@ -151,9 +150,7 @@ fn ipc_request(request: &str) -> Result<String, String> {
     }
 
     if !response.starts_with("OK") {
-        return Err(format!(
-            "unexpected al80d response: {response}"
-        ));
+        return Err(format!("unexpected al80d response: {response}"));
     }
 
     Ok(response)
@@ -167,94 +164,60 @@ fn parse_fields(response: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn field<'a>(
-    fields: &'a [(&'a str, &'a str)],
-    name: &str,
-) -> Option<&'a str> {
+fn field<'a>(fields: &'a [(&'a str, &'a str)], name: &str) -> Option<&'a str> {
     fields
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, value)| *value)
 }
 
-fn parse_on_off(
-    value: Option<&str>,
-    name: &str,
-) -> Result<bool, String> {
+fn parse_on_off(value: Option<&str>, name: &str) -> Result<bool, String> {
     match value {
         Some("ON") => Ok(true),
         Some("OFF") => Ok(false),
-        Some(other) => Err(format!(
-            "invalid al80d {name} value: {other}"
-        )),
-        None => Err(format!(
-            "missing al80d {name} value"
-        )),
+        Some(other) => Err(format!("invalid al80d {name} value: {other}")),
+        None => Err(format!("missing al80d {name} value")),
     }
 }
 
-fn parse_yes_no(
-    value: Option<&str>,
-    name: &str,
-) -> Result<bool, String> {
+fn parse_yes_no(value: Option<&str>, name: &str) -> Result<bool, String> {
     match value {
         Some("YES") => Ok(true),
         Some("NO") => Ok(false),
-        Some(other) => Err(format!(
-            "invalid al80d {name} value: {other}"
-        )),
-        None => Err(format!(
-            "missing al80d {name} value"
-        )),
+        Some(other) => Err(format!("invalid al80d {name} value: {other}")),
+        None => Err(format!("missing al80d {name} value")),
     }
 }
 
 fn parse_status(response: &str) -> Result<DeviceStatus, String> {
     let fields = parse_fields(response);
 
-    let connected = parse_yes_no(
-        field(&fields, "connected"),
-        "connected",
-    )?;
+    let connected = parse_yes_no(field(&fields, "connected"), "connected")?;
 
     if !connected {
-        return Ok(DeviceStatus::offline(
-            "al80d reports keyboard offline",
-        ));
+        return Ok(DeviceStatus::offline("al80d reports keyboard offline"));
     }
 
     let scan = field(&fields, "scan_hz")
         .ok_or_else(|| "missing al80d scan_hz".to_string())?
         .parse::<u32>()
-        .map_err(|error| {
-            format!("invalid al80d scan_hz: {error}")
-        })?;
+        .map_err(|error| format!("invalid al80d scan_hz: {error}"))?;
 
     if scan == 0 {
         return Err("al80d scan_hz cannot be zero".to_string());
     }
 
-    let rgb = parse_on_off(
-        field(&fields, "rgb"),
-        "rgb",
-    )?;
+    let rgb = parse_on_off(field(&fields, "rgb"), "rgb")?;
 
-    let overlay = parse_on_off(
-        field(&fields, "overlay"),
-        "overlay",
-    )?;
+    let overlay = parse_on_off(field(&fields, "overlay"), "overlay")?;
 
-    let overlay_rgb = parse_on_off(
-        field(&fields, "overlay_rgb"),
-        "overlay_rgb",
-    )?;
+    let overlay_rgb = parse_on_off(field(&fields, "overlay_rgb"), "overlay_rgb")?;
 
     Ok(DeviceStatus {
         connected: true,
         devnode: field(&fields, "devnode").map(str::to_string),
         matrix_scan_hz: Some(scan),
-        matrix_scan_interval_us:
-            Some(1_000_000.0 / scan as f64),
+        matrix_scan_interval_us: Some(1_000_000.0 / scan as f64),
         rgb_core_enabled: Some(rgb),
         overlay_enabled: Some(overlay),
         overlay_reports_rgb_core: Some(overlay_rgb),
@@ -262,120 +225,86 @@ fn parse_status(response: &str) -> Result<DeviceStatus, String> {
     })
 }
 
-fn parse_capabilities(
-    response: &str,
-) -> Result<Capabilities, String> {
+fn parse_capabilities(response: &str) -> Result<Capabilities, String> {
     let fields = parse_fields(response);
 
     let api = field(&fields, "api")
         .ok_or_else(|| "missing capability api".to_string())?
         .parse::<u32>()
-        .map_err(|error| {
-            format!("invalid capability api: {error}")
-        })?;
+        .map_err(|error| format!("invalid capability api: {error}"))?;
 
     let scan_hz = field(&fields, "scan_hz")
         .map(|value| value.parse::<u32>())
         .transpose()
-        .map_err(|error| {
-            format!("invalid capability scan_hz: {error}")
-        })?;
+        .map_err(|error| format!("invalid capability scan_hz: {error}"))?;
 
     Ok(Capabilities {
         api,
-        daemon_version:
-            field(&fields, "daemon")
-                .unwrap_or("unknown")
-                .to_string(),
-        firmware_mode:
-            field(&fields, "firmware")
-                .unwrap_or("UNKNOWN")
-                .to_string(),
-        matrix_scan: parse_yes_no(
-            field(&fields, "matrix_scan"),
-            "matrix_scan",
-        )?,
-        rgb_runtime: parse_yes_no(
-            field(&fields, "rgb_runtime"),
-            "rgb_runtime",
-        )?,
-        overlay: parse_yes_no(
-            field(&fields, "overlay"),
-            "overlay",
-        )?,
-        lcd_osd: parse_yes_no(
-            field(&fields, "lcd_osd"),
-            "lcd_osd",
-        )?,
-        audio_watch: parse_yes_no(
-            field(&fields, "audio_watch"),
-            "audio_watch",
-        )?,
-        profiles: parse_yes_no(
-            field(&fields, "profiles"),
-            "profiles",
-        )?,
-        extension_manifest:
-            field(&fields, "extension_manifest")
-                .unwrap_or("NONE")
-                .to_string(),
+        daemon_version: field(&fields, "daemon").unwrap_or("unknown").to_string(),
+        firmware_mode: field(&fields, "firmware").unwrap_or("UNKNOWN").to_string(),
+        matrix_scan: parse_yes_no(field(&fields, "matrix_scan"), "matrix_scan")?,
+        rgb_runtime: parse_yes_no(field(&fields, "rgb_runtime"), "rgb_runtime")?,
+        overlay: parse_yes_no(field(&fields, "overlay"), "overlay")?,
+        lcd_osd: parse_yes_no(field(&fields, "lcd_osd"), "lcd_osd")?,
+        audio_watch: parse_yes_no(field(&fields, "audio_watch"), "audio_watch")?,
+        profiles: parse_yes_no(field(&fields, "profiles"), "profiles")?,
+        extension_manifest: field(&fields, "extension_manifest")
+            .unwrap_or("NONE")
+            .to_string(),
         per_key_rgb: parse_yes_no(field(&fields, "per_key_rgb"), "per_key_rgb")?,
         creator_scene: parse_yes_no(field(&fields, "creator_scene"), "creator_scene")?,
-        rgb_leds: field(&fields, "rgb_leds").unwrap_or("0").parse::<u32>()
+        rgb_leds: field(&fields, "rgb_leds")
+            .unwrap_or("0")
+            .parse::<u32>()
             .map_err(|error| format!("invalid capability rgb_leds: {error}"))?,
-        key_rgb_leds: field(&fields, "key_rgb_leds").unwrap_or("0").parse::<u32>()
+        key_rgb_leds: field(&fields, "key_rgb_leds")
+            .unwrap_or("0")
+            .parse::<u32>()
             .map_err(|error| format!("invalid capability key_rgb_leds: {error}"))?,
-        accent_rgb_leds: field(&fields, "accent_rgb_leds").unwrap_or("0").parse::<u32>()
+        accent_rgb_leds: field(&fields, "accent_rgb_leds")
+            .unwrap_or("0")
+            .parse::<u32>()
             .map_err(|error| format!("invalid capability accent_rgb_leds: {error}"))?,
         creator_scene_state: match field(&fields, "creator_scene_state") {
             Some(value) => Some(parse_on_off(Some(value), "creator_scene_state")?),
             None => None,
         },
-        persistent_write: parse_yes_no(
-            field(&fields, "persistent_write"),
-            "persistent_write",
-        )?,
-        eeprom_write: parse_yes_no(
-            field(&fields, "eeprom_write"),
-            "eeprom_write",
-        )?,
-        qmk_flash: parse_yes_no(
-            field(&fields, "qmk_flash"),
-            "qmk_flash",
-        )?,
-        scan_hz,
-        rgb_state: match field(&fields, "rgb_state") {
-            Some(value) => Some(parse_on_off(
-                Some(value),
-                "rgb_state",
-            )?),
+        input_router: parse_yes_no(field(&fields, "input_router"), "input_router")?,
+        input_bindings: field(&fields, "input_bindings")
+            .unwrap_or("0")
+            .parse::<u32>()
+            .map_err(|error| format!("invalid capability input_bindings: {error}"))?,
+        input_actions: field(&fields, "input_actions")
+            .unwrap_or("0")
+            .parse::<u32>()
+            .map_err(|error| format!("invalid capability input_actions: {error}"))?,
+        input_router_state: match field(&fields, "input_router_state") {
+            Some(value) => Some(parse_on_off(Some(value), "input_router_state")?),
             None => None,
         },
-        overlay_state:
-            match field(&fields, "overlay_state") {
-                Some(value) => Some(parse_on_off(
-                    Some(value),
-                    "overlay_state",
-                )?),
-                None => None,
-            },
-        overlay_rgb_state:
-            match field(&fields, "overlay_rgb_state") {
-                Some(value) => Some(parse_on_off(
-                    Some(value),
-                    "overlay_rgb_state",
-                )?),
-                None => None,
-            },
+        persistent_write: parse_yes_no(field(&fields, "persistent_write"), "persistent_write")?,
+        eeprom_write: parse_yes_no(field(&fields, "eeprom_write"), "eeprom_write")?,
+        qmk_flash: parse_yes_no(field(&fields, "qmk_flash"), "qmk_flash")?,
+        scan_hz,
+        rgb_state: match field(&fields, "rgb_state") {
+            Some(value) => Some(parse_on_off(Some(value), "rgb_state")?),
+            None => None,
+        },
+        overlay_state: match field(&fields, "overlay_state") {
+            Some(value) => Some(parse_on_off(Some(value), "overlay_state")?),
+            None => None,
+        },
+        overlay_rgb_state: match field(&fields, "overlay_rgb_state") {
+            Some(value) => Some(parse_on_off(Some(value), "overlay_rgb_state")?),
+            None => None,
+        },
         error: None,
     })
 }
 
 #[tauri::command]
 fn get_device_status() -> DeviceStatus {
-    match ipc_request("STATUS").and_then(
-        |response| parse_status(&response),
-    ) {
+    match ipc_request("STATUS").and_then(|response| parse_status(&response)) {
         Ok(status) => status,
         Err(error) => DeviceStatus::offline(error),
     }
@@ -383,64 +312,39 @@ fn get_device_status() -> DeviceStatus {
 
 #[tauri::command]
 fn get_capabilities() -> Capabilities {
-    match ipc_request("CAPABILITIES").and_then(
-        |response| parse_capabilities(&response),
-    ) {
+    match ipc_request("CAPABILITIES").and_then(|response| parse_capabilities(&response)) {
         Ok(capabilities) => capabilities,
         Err(error) => Capabilities::offline(error),
     }
 }
 
 #[tauri::command]
-fn set_rgb_core_runtime(
-    enabled: bool,
-) -> Result<bool, String> {
-    let request = if enabled {
-        "RGB ON"
-    } else {
-        "RGB OFF"
-    };
+fn set_rgb_core_runtime(enabled: bool) -> Result<bool, String> {
+    let request = if enabled { "RGB ON" } else { "RGB OFF" };
 
     let response = ipc_request(request)?;
 
     match response.as_str() {
         "OK rgb=ON" => Ok(true),
         "OK rgb=OFF" => Ok(false),
-        other => Err(format!(
-            "unexpected al80d RGB response: {other}"
-        )),
+        other => Err(format!("unexpected al80d RGB response: {other}")),
     }
 }
 
 #[tauri::command]
-fn set_overlay_runtime(
-    enabled: bool,
-) -> Result<bool, String> {
-    let request = if enabled {
-        "OVERLAY ON"
-    } else {
-        "OVERLAY OFF"
-    };
+fn set_overlay_runtime(enabled: bool) -> Result<bool, String> {
+    let request = if enabled { "OVERLAY ON" } else { "OVERLAY OFF" };
 
     let response = ipc_request(request)?;
     let fields = parse_fields(&response);
 
-    parse_on_off(
-        field(&fields, "overlay"),
-        "overlay",
-    )
+    parse_on_off(field(&fields, "overlay"), "overlay")
 }
 
 #[tauri::command]
-fn run_safe_extension_command(
-    command: String,
-) -> Result<String, String> {
+fn run_safe_extension_command(command: String) -> Result<String, String> {
     match command.as_str() {
-        "OVERLAY ON"
-        | "OVERLAY OFF"
-        | "RGB ON"
-        | "RGB OFF"
-        | "LCD HOME" => ipc_request(&command),
+        "OVERLAY ON" | "OVERLAY OFF" | "RGB ON" | "RGB OFF" | "LCD HOME" => ipc_request(&command),
 
         _ => Err(format!(
             "extension command is not allowed in Manifest V1: {command}"
@@ -448,10 +352,123 @@ fn run_safe_extension_command(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InputBindingRequest {
+    event: u8,
+    trigger: u8,
+    trigger_a: u8,
+    trigger_b: u8,
+    action: u8,
+}
+
+fn validate_input_binding_request(
+    index: usize,
+    binding: &InputBindingRequest,
+) -> Result<(), String> {
+    if !(1..=3).contains(&binding.event) {
+        return Err(format!(
+            "binding {index} has invalid event {}",
+            binding.event
+        ));
+    }
+
+    if binding.trigger > 3 {
+        return Err(format!(
+            "binding {index} has invalid trigger {}",
+            binding.trigger
+        ));
+    }
+
+    if binding.action > 24 {
+        return Err(format!(
+            "binding {index} has invalid action {}",
+            binding.action
+        ));
+    }
+
+    match binding.trigger {
+        0 => {
+            if binding.trigger_a != 0 || binding.trigger_b != 0 {
+                return Err(format!("binding {index}: Always trigger requires A=0/B=0"));
+            }
+        }
+        1 => {
+            if binding.trigger_a >= 32 || binding.trigger_b != 0 {
+                return Err(format!("binding {index}: Layer requires 0..31 and B=0"));
+            }
+        }
+        2 => {
+            // Matrix bounds are authoritatively validated by firmware.
+            // The normal GUI obtains row/column from the recovered layout.
+        }
+        3 => {
+            if binding.trigger_a == 0 || binding.trigger_b != 0 {
+                return Err(format!(
+                    "binding {index}: Modifiers requires nonzero mask and B=0"
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_input_router_status() -> Result<String, String> {
+    ipc_request("INPUT STATUS")
+}
+
+#[tauri::command]
+fn get_input_router_dump() -> Result<String, String> {
+    ipc_request("INPUT DUMP")
+}
+
+#[tauri::command]
+fn disable_input_router() -> Result<String, String> {
+    ipc_request("INPUT OFF")
+}
+
+#[tauri::command]
+fn restore_input_defaults() -> Result<String, String> {
+    ipc_request("INPUT DEFAULTS")
+}
+
+#[tauri::command]
+fn apply_input_profile(bindings: Vec<InputBindingRequest>) -> Result<String, String> {
+    if bindings.is_empty() {
+        return Err("Input profile must contain at least one binding".to_string());
+    }
+
+    if bindings.len() > 12 {
+        return Err(format!(
+            "Input profile accepts at most 12 bindings, got {}",
+            bindings.len()
+        ));
+    }
+
+    let mut encoded = Vec::with_capacity(bindings.len());
+
+    for (index, binding) in bindings.iter().enumerate() {
+        validate_input_binding_request(index, binding)?;
+
+        encoded.push(format!(
+            "{},{},{},{},{}",
+            binding.event, binding.trigger, binding.trigger_a, binding.trigger_b, binding.action,
+        ));
+    }
+
+    ipc_request(&format!("INPUT APPLY {}", encoded.join(";")))
+}
+
 #[tauri::command]
 fn apply_creator_scene(colors: Vec<String>) -> Result<String, String> {
     if colors.len() != 82 {
-        return Err(format!("Creator Scene requires 82 colors, got {}", colors.len()));
+        return Err(format!(
+            "Creator Scene requires 82 colors, got {}",
+            colors.len()
+        ));
     }
     let mut encoded = String::with_capacity(82 * 6);
     for (index, color) in colors.iter().enumerate() {
@@ -481,22 +498,14 @@ fn lcd_home() -> Result<(), String> {
     if response == "OK lcd=HOME" {
         Ok(())
     } else {
-        Err(format!(
-            "unexpected al80d LCD HOME response: {response}"
-        ))
+        Err(format!("unexpected al80d LCD HOME response: {response}"))
     }
 }
 
 #[tauri::command]
-fn lcd_preview(
-    percent: u8,
-    muted: bool,
-) -> Result<String, String> {
+fn lcd_preview(percent: u8, muted: bool) -> Result<String, String> {
     if percent > 100 {
-        return Err(
-            "LCD preview percent must be between 0 and 100"
-                .to_string()
-        );
+        return Err("LCD preview percent must be between 0 and 100".to_string());
     }
 
     let request = if muted {
@@ -511,24 +520,23 @@ fn lcd_preview(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(
-            tauri::generate_handler![
-                get_device_status,
-                get_capabilities,
-                set_rgb_core_runtime,
-                set_overlay_runtime,
-                run_safe_extension_command,
-                apply_creator_scene,
-                disable_creator_scene,
-                get_creator_scene_status,
-                lcd_home,
-                lcd_preview
-            ],
-        )
-        .run(
-            tauri::generate_context!()
-        )
-        .expect(
-            "error while running AL80 Studio"
-        );
+        .invoke_handler(tauri::generate_handler![
+            get_device_status,
+            get_capabilities,
+            set_rgb_core_runtime,
+            set_overlay_runtime,
+            run_safe_extension_command,
+            get_input_router_status,
+            get_input_router_dump,
+            disable_input_router,
+            restore_input_defaults,
+            apply_input_profile,
+            apply_creator_scene,
+            disable_creator_scene,
+            get_creator_scene_status,
+            lcd_home,
+            lcd_preview
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running AL80 Studio");
 }

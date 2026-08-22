@@ -4,11 +4,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use al80_core::Al80;
+use al80_core::{Al80, InputAction, InputBinding, InputEvent, InputTrigger};
 
 const SETTLE: Duration = Duration::from_millis(50);
 const HOME_IDLE: Duration = Duration::from_secs(3);
@@ -64,23 +64,18 @@ impl DeviceOwner {
                 // controls or reads, so one reconnect-and-retry is safe.
                 self.device = None;
 
-                eprintln!(
-                    "AL80D_TRANSACTION_RETRY=YES FIRST_ERROR={first_error}"
-                );
+                eprintln!("AL80D_TRANSACTION_RETRY=YES FIRST_ERROR={first_error}");
 
                 let retry_result = {
-                    let device = self.ensure_connected().map_err(
-                        |reconnect_error| {
-                            format!(
-                                concat!(
-                                    "AL80 reconnect failed after transaction ",
-                                    "error: first={}; reconnect={}"
-                                ),
-                                first_error,
-                                reconnect_error
-                            )
-                        },
-                    )?;
+                    let device = self.ensure_connected().map_err(|reconnect_error| {
+                        format!(
+                            concat!(
+                                "AL80 reconnect failed after transaction ",
+                                "error: first={}; reconnect={}"
+                            ),
+                            first_error, reconnect_error
+                        )
+                    })?;
 
                     f(device)
                 };
@@ -99,8 +94,7 @@ impl DeviceOwner {
                                 "AL80 transaction failed after reconnect: ",
                                 "first={}; retry={}"
                             ),
-                            first_error,
-                            retry_error
+                            first_error, retry_error
                         ))
                     }
                 }
@@ -111,9 +105,7 @@ impl DeviceOwner {
 
 type SharedDevice = Arc<Mutex<DeviceOwner>>;
 
-fn lock_device(
-    shared: &SharedDevice,
-) -> Result<MutexGuard<'_, DeviceOwner>, String> {
+fn lock_device(shared: &SharedDevice) -> Result<MutexGuard<'_, DeviceOwner>, String> {
     shared
         .lock()
         .map_err(|_| "AL80D device mutex poisoned".to_string())
@@ -152,9 +144,7 @@ fn read_volume() -> Result<VolumeState, String> {
         }
     }
 
-    let percent = percent.ok_or_else(|| {
-        format!("cannot parse wpctl output: {}", raw.trim())
-    })?;
+    let percent = percent.ok_or_else(|| format!("cannot parse wpctl output: {}", raw.trim()))?;
 
     let muted = raw.to_ascii_uppercase().contains("[MUTED]");
 
@@ -166,14 +156,9 @@ fn lcd_home(shared: &SharedDevice) -> Result<(), String> {
     owner.operation(|device| device.lcd_home())
 }
 
-fn lcd_volume(
-    shared: &SharedDevice,
-    state: VolumeState,
-) -> Result<f64, String> {
+fn lcd_volume(shared: &SharedDevice, state: VolumeState) -> Result<f64, String> {
     let mut owner = lock_device(shared)?;
-    owner.operation(|device| {
-        device.lcd_volume_osd(state.percent, state.muted)
-    })
+    owner.operation(|device| device.lcd_volume_osd(state.percent, state.muted))
 }
 
 fn status_line(shared: &SharedDevice) -> Result<String, String> {
@@ -191,14 +176,16 @@ fn status_line(shared: &SharedDevice) -> Result<String, String> {
             scan,
             if rgb { "ON" } else { "OFF" },
             if overlay.enabled { "ON" } else { "OFF" },
-            if overlay.rgb_core_enabled { "ON" } else { "OFF" },
+            if overlay.rgb_core_enabled {
+                "ON"
+            } else {
+                "OFF"
+            },
         ))
     })
 }
 
-fn capabilities_line(
-    shared: &SharedDevice,
-) -> Result<String, String> {
+fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
     let mut owner = lock_device(shared)?;
 
     owner.operation(|device| {
@@ -206,10 +193,11 @@ fn capabilities_line(
         let rgb = device.rgb_core_enabled()?;
         let overlay = device.overlay_status()?;
         let creator = device.creator_scene_status()?;
+        let input = device.input_router_status()?;
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.2.0 ",
+                "OK api=1 daemon=0.3.0 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -224,6 +212,10 @@ fn capabilities_line(
                 "key_rgb_leds=79 ",
                 "accent_rgb_leds=3 ",
                 "creator_scene_state={} ",
+                "input_router=YES ",
+                "input_bindings={} ",
+                "input_actions={} ",
+                "input_router_state={} ",
                 "persistent_write=NO ",
                 "eeprom_write=NO ",
                 "qmk_flash=NO ",
@@ -233,26 +225,85 @@ fn capabilities_line(
                 "overlay_rgb_state={}"
             ),
             if creator.enabled { "ON" } else { "OFF" },
+            input.binding_slots,
+            input.max_action,
+            if input.enabled { "ON" } else { "OFF" },
             scan,
             if rgb { "ON" } else { "OFF" },
             if overlay.enabled { "ON" } else { "OFF" },
-            if overlay.rgb_core_enabled { "ON" } else { "OFF" },
+            if overlay.rgb_core_enabled {
+                "ON"
+            } else {
+                "OFF"
+            },
         ))
     })
 }
 
-fn decode_creator_scene_hex(
-    raw: &str,
-) -> Result<Vec<[u8; 3]>, String> {
+fn decode_input_bindings(raw: &str) -> Result<Vec<InputBinding>, String> {
+    if raw.is_empty() {
+        return Err("Input Router profile is empty".to_string());
+    }
+
+    let segments: Vec<&str> = raw.split(';').collect();
+
+    if segments.len() > 12 {
+        return Err(format!(
+            "Input Router accepts at most 12 bindings, got {}",
+            segments.len()
+        ));
+    }
+
+    let mut bindings = Vec::with_capacity(segments.len());
+
+    for (index, segment) in segments.iter().enumerate() {
+        let values: Vec<&str> = segment.split(',').collect();
+
+        if values.len() != 5 {
+            return Err(format!(
+                "binding {} must contain event,trigger,a,b,action",
+                index
+            ));
+        }
+
+        let parse = |name: &str, value: &str| -> Result<u8, String> {
+            value
+                .parse::<u8>()
+                .map_err(|error| format!("invalid {name} in binding {index}: {error}"))
+        };
+
+        let event = InputEvent::try_from(parse("event", values[0])?)?;
+        let trigger = InputTrigger::try_from(parse("trigger", values[1])?)?;
+        let trigger_a = parse("trigger_a", values[2])?;
+        let trigger_b = parse("trigger_b", values[3])?;
+        let action = InputAction::from_id(parse("action", values[4])?)?;
+
+        bindings.push(InputBinding::new(
+            event, trigger, trigger_a, trigger_b, action,
+        )?);
+    }
+
+    Ok(bindings)
+}
+
+fn input_status_line(enabled: bool, version: u8, slots: u8, actions: u8, fallback: bool) -> String {
+    format!(
+        "OK input={} version={} slots={} actions={} fallback={}",
+        if enabled { "ON" } else { "OFF" },
+        version,
+        slots,
+        actions,
+        if fallback { "YES" } else { "NO" },
+    )
+}
+
+fn decode_creator_scene_hex(raw: &str) -> Result<Vec<[u8; 3]>, String> {
     const LEDS: usize = 82;
     const HEX_PER_LED: usize = 6;
     const EXPECTED: usize = LEDS * HEX_PER_LED;
 
     if !raw.is_ascii() {
-        return Err(
-            "Creator Scene payload must be ASCII hex"
-                .to_string()
-        );
+        return Err("Creator Scene payload must be ASCII hex".to_string());
     }
 
     if raw.len() != EXPECTED {
@@ -266,14 +317,8 @@ fn decode_creator_scene_hex(
         ));
     }
 
-    if !raw
-        .bytes()
-        .all(|value| value.is_ascii_hexdigit())
-    {
-        return Err(
-            "Creator Scene payload contains non-hex data"
-                .to_string()
-        );
+    if !raw.bytes().all(|value| value.is_ascii_hexdigit()) {
+        return Err("Creator Scene payload contains non-hex data".to_string());
     }
 
     let mut colors = Vec::with_capacity(LEDS);
@@ -283,12 +328,7 @@ fn decode_creator_scene_hex(
         let chunk = &raw[start..start + HEX_PER_LED];
 
         let value = u32::from_str_radix(chunk, 16)
-            .map_err(|_| {
-                format!(
-                    "invalid RGB hex at Creator LED {}",
-                    index
-                )
-            })?;
+            .map_err(|_| format!("invalid RGB hex at Creator LED {}", index))?;
 
         colors.push([
             ((value >> 16) & 0xFF) as u8,
@@ -313,10 +353,7 @@ fn parse_percent(value: Option<&str>) -> Result<u8, String> {
     Ok(percent)
 }
 
-fn handle_request(
-    request: &str,
-    shared: &SharedDevice,
-) -> Result<String, String> {
+fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String> {
     let fields: Vec<&str> = request.split_whitespace().collect();
 
     if fields.is_empty() {
@@ -333,19 +370,13 @@ fn handle_request(
         ["RGB", "ON"] => {
             let mut owner = lock_device(shared)?;
             let state = owner.operation(|device| device.set_rgb_core(true))?;
-            Ok(format!(
-                "OK rgb={}",
-                if state { "ON" } else { "OFF" }
-            ))
+            Ok(format!("OK rgb={}", if state { "ON" } else { "OFF" }))
         }
 
         ["RGB", "OFF"] => {
             let mut owner = lock_device(shared)?;
             let state = owner.operation(|device| device.set_rgb_core(false))?;
-            Ok(format!(
-                "OK rgb={}",
-                if state { "ON" } else { "OFF" }
-            ))
+            Ok(format!("OK rgb={}", if state { "ON" } else { "OFF" }))
         }
 
         ["OVERLAY", "STATUS"] => {
@@ -378,12 +409,99 @@ fn handle_request(
             ))
         }
 
+        ["INPUT", "STATUS"] => {
+            let mut owner = lock_device(shared)?;
+            let state = owner.operation(|device| device.input_router_status())?;
+
+            Ok(input_status_line(
+                state.enabled,
+                state.version,
+                state.binding_slots,
+                state.max_action,
+                state.fallback_supported,
+            ))
+        }
+
+        ["INPUT", "OFF"] => {
+            let mut owner = lock_device(shared)?;
+            let state = owner.operation(|device| device.input_router_disable())?;
+
+            Ok(input_status_line(
+                state.enabled,
+                state.version,
+                state.binding_slots,
+                state.max_action,
+                state.fallback_supported,
+            ))
+        }
+
+        ["INPUT", "DEFAULTS"] => {
+            let mut owner = lock_device(shared)?;
+            let state = owner.operation(|device| device.input_router_apply_defaults())?;
+
+            Ok(input_status_line(
+                state.enabled,
+                state.version,
+                state.binding_slots,
+                state.max_action,
+                state.fallback_supported,
+            ))
+        }
+
+        ["INPUT", "APPLY", raw] => {
+            let bindings = decode_input_bindings(raw)?;
+            let count = bindings.len();
+            let mut owner = lock_device(shared)?;
+            let state = owner.operation(|device| device.input_router_apply(&bindings))?;
+
+            Ok(format!(
+                "OK input={} bindings={} version={} slots={} actions={} fallback={}",
+                if state.enabled { "ON" } else { "OFF" },
+                count,
+                state.version,
+                state.binding_slots,
+                state.max_action,
+                if state.fallback_supported {
+                    "YES"
+                } else {
+                    "NO"
+                },
+            ))
+        }
+
+        ["INPUT", "DUMP"] => {
+            let mut owner = lock_device(shared)?;
+
+            owner.operation(|device| {
+                let state = device.input_router_status()?;
+                let mut encoded = Vec::new();
+
+                for slot in 0u8..12u8 {
+                    if let Some(binding) = device.input_router_get_binding(slot)? {
+                        encoded.push(format!(
+                            "{},{},{},{},{},{}",
+                            slot,
+                            binding.event as u8,
+                            binding.trigger as u8,
+                            binding.trigger_a,
+                            binding.trigger_b,
+                            binding.action.id(),
+                        ));
+                    }
+                }
+
+                Ok(format!(
+                    "OK input={} bindings={}",
+                    if state.enabled { "ON" } else { "OFF" },
+                    encoded.join(";")
+                ))
+            })
+        }
+
         ["SCENE", "STATUS"] => {
             let mut owner = lock_device(shared)?;
 
-            let state = owner.operation(
-                |device| device.creator_scene_status()
-            )?;
+            let state = owner.operation(|device| device.creator_scene_status())?;
 
             Ok(format!(
                 "OK scene={} rgb={} leds={} chunk={}",
@@ -397,9 +515,7 @@ fn handle_request(
         ["SCENE", "OFF"] => {
             let mut owner = lock_device(shared)?;
 
-            let state = owner.operation(
-                |device| device.creator_scene_disable()
-            )?;
+            let state = owner.operation(|device| device.creator_scene_disable())?;
 
             Ok(format!(
                 "OK scene={} rgb={}",
@@ -409,16 +525,11 @@ fn handle_request(
         }
 
         ["SCENE", "APPLY", raw] => {
-            let colors =
-                decode_creator_scene_hex(raw)?;
+            let colors = decode_creator_scene_hex(raw)?;
 
             let mut owner = lock_device(shared)?;
 
-            let state = owner.operation(
-                |device| {
-                    device.creator_scene_apply(&colors)
-                }
-            )?;
+            let state = owner.operation(|device| device.creator_scene_apply(&colors))?;
 
             Ok(format!(
                 "OK scene={} rgb={} leds={}",
@@ -457,10 +568,7 @@ fn handle_request(
                     muted: true,
                 },
             )?;
-            Ok(format!(
-                "OK lcd=MUTE percent={} ack_ms={:.3}",
-                percent, ack
-            ))
+            Ok(format!("OK lcd=MUTE percent={} ack_ms={:.3}", percent, ack))
         }
 
         ["AUDIO", "CURRENT"] => {
@@ -476,10 +584,7 @@ fn handle_request(
     }
 }
 
-fn handle_client(
-    mut stream: UnixStream,
-    shared: SharedDevice,
-) {
+fn handle_client(mut stream: UnixStream, shared: SharedDevice) {
     let cloned = match stream.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
@@ -510,23 +615,16 @@ fn handle_client(
     let _ = writeln!(stream, "{response}");
 }
 
-fn start_ipc_server(
-    shared: SharedDevice,
-) -> Result<thread::JoinHandle<()>, String> {
+fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, String> {
     let path = socket_path();
 
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| {
-            format!(
-                "cannot remove stale socket {}: {e}",
-                path.display()
-            )
-        })?;
+        fs::remove_file(&path)
+            .map_err(|e| format!("cannot remove stale socket {}: {e}", path.display()))?;
     }
 
-    let listener = UnixListener::bind(&path).map_err(|e| {
-        format!("cannot bind {}: {e}", path.display())
-    })?;
+    let listener =
+        UnixListener::bind(&path).map_err(|e| format!("cannot bind {}: {e}", path.display()))?;
 
     println!("AL80D_SOCKET={}", path.display());
     println!("AL80D_IPC_READY=YES");
@@ -547,14 +645,7 @@ fn start_ipc_server(
     }))
 }
 
-fn start_audio_reader() -> Result<
-    (
-        Child,
-        mpsc::Receiver<String>,
-        thread::JoinHandle<()>,
-    ),
-    String,
-> {
+fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHandle<()>), String> {
     let mut child = Command::new("/usr/bin/pactl")
         .arg("subscribe")
         .stdout(Stdio::piped())
@@ -587,9 +678,7 @@ fn start_audio_reader() -> Result<
     Ok((child, rx, handle))
 }
 
-fn run_audio_session(
-    shared: &SharedDevice,
-) -> Result<(), String> {
+fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
     println!("AL80D_LCD_SESSION_START=YES");
 
     lcd_home(shared)?;
@@ -617,9 +706,8 @@ fn run_audio_session(
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
-                let relevant =
-                    line.contains("Event 'change' on sink")
-                        || line.contains("Event 'change' on server");
+                let relevant = line.contains("Event 'change' on sink")
+                    || line.contains("Event 'change' on server");
 
                 if relevant {
                     let current = read_volume()?;
@@ -672,17 +760,13 @@ fn run_audio_session(
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader_thread.join();
-                return Err(
-                    "pactl subscribe reader disconnected".to_string()
-                );
+                return Err("pactl subscribe reader disconnected".to_string());
             }
         }
 
         let now = Instant::now();
 
-        if let (Some(state), Some(since)) =
-            (pending, pending_since)
-        {
+        if let (Some(state), Some(since)) = (pending, pending_since) {
             if now.duration_since(since) >= SETTLE {
                 pending = None;
                 pending_since = None;
@@ -719,16 +803,14 @@ fn run_audio_session(
             .map_err(|e| format!("pactl poll failed: {e}"))?
         {
             let _ = reader_thread.join();
-            return Err(format!(
-                "pactl subscribe exited: {status}"
-            ));
+            return Err(format!("pactl subscribe exited: {status}"));
         }
     }
 }
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.2.0");
+    println!("AL80D_VERSION=0.3.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");

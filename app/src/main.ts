@@ -1,10 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
+import {
+  bindInputDesignerEvents,
+  refreshInputDesigner,
+  renderInputDesigner,
+} from "./input-designer";
 
 type View =
   | "dashboard"
   | "effects"
   | "creator"
+  | "inputs"
   | "rgb"
   | "lcd"
   | "profiles"
@@ -38,6 +44,10 @@ interface Capabilities {
   keyRgbLeds: number;
   accentRgbLeds: number;
   creatorSceneState: boolean | null;
+  inputRouter: boolean;
+  inputBindings: number;
+  inputActions: number;
+  inputRouterState: boolean | null;
   persistentWrite: boolean;
   eepromWrite: boolean;
   qmkFlash: boolean;
@@ -958,6 +968,8 @@ function renderPage(): string {
       return renderEffects();
     case "creator":
       return renderCreator();
+    case "inputs":
+      return renderInputDesigner(capabilities, busy);
     case "rgb":
       return renderRgb();
     case "lcd":
@@ -989,6 +1001,7 @@ function render(): void {
           ${navButton("dashboard", "Dashboard")}
           ${navButton("effects", "Effects")}
           ${navButton("creator", "Creator")}
+          ${navButton("inputs", "Inputs")}
           ${navButton("rgb", "RGB")}
           ${navButton("lcd", "LCD")}
           ${navButton("profiles", "Profiles")}
@@ -1034,6 +1047,7 @@ async function refresh(message = ""): Promise<void> {
     capabilities = nextCaps;
     registry = nextRegistry;
     creatorLayout = nextCreatorLayout;
+    await refreshInputDesigner();
     profiles = loadProfiles();
     savedCreatorScenes = loadCreatorScenes();
 
@@ -1096,6 +1110,17 @@ function bindEvents(): void {
     ?.addEventListener("click", () => {
       void refresh("Refreshed.");
     });
+
+  bindInputDesignerEvents({
+    capabilities,
+    busy,
+    runAction: action,
+    rerender: render,
+    setNotice: (message: string) => {
+      notice = message;
+      render();
+    },
+  });
 
   document
     .querySelector<HTMLInputElement>("#creator-color")
