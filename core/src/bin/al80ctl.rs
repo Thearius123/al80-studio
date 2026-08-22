@@ -1,3 +1,4 @@
+use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -72,6 +73,7 @@ fn help() {
     println!("  al80ctl lcd home");
     println!("  al80ctl lcd volume <0-100>");
     println!("  al80ctl lcd mute <0-100>");
+    println!("  al80ctl lcd feedback <kind> <value>");
 }
 
 fn percent(raw: &str) -> Result<u8, String> {
@@ -130,6 +132,16 @@ fn build_command(args: &[String]) -> Result<String, String> {
                 return Err("scene solid expects RRGGBB".to_string());
             }
             Ok(format!("SCENE APPLY {}", color.repeat(82)))
+        }
+
+        [group, mode, kind, value] if group == "lcd" && mode == "feedback" => {
+            let feedback = LcdFeedback::parse(kind, value)?;
+
+            Ok(format!(
+                "LCD FEEDBACK {} {}",
+                feedback.kind_token(),
+                feedback.value_token(),
+            ))
         }
 
         [group, state] if group == "lcd" && state == "home" => Ok("LCD HOME".to_string()),

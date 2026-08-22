@@ -1,3 +1,5 @@
+pub mod lcd_feedback;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -495,6 +497,124 @@ impl Al80 {
         }
 
         Ok(elapsed_ms)
+    }
+
+    fn lcd_bridge_packet(&mut self, command: u8, offset: u16, data: &[u8]) -> Result<f64, String> {
+        const MAX_LCD_BRIDGE_DATA: usize = 25;
+
+        if data.len() > MAX_LCD_BRIDGE_DATA {
+            return Err(format!(
+                "LCD bridge chunk too large: {} > {}",
+                data.len(),
+                MAX_LCD_BRIDGE_DATA
+            ));
+        }
+
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = command;
+        payload[1] = (offset & 0xFF) as u8;
+        payload[2] = (offset >> 8) as u8;
+        payload[3] = data.len() as u8;
+        payload[7..7 + data.len()].copy_from_slice(data);
+
+        let (response, elapsed_ms) = self.transact_raw32(&payload, Duration::from_millis(750))?;
+
+        if response.len() <= 6 || response[6] != STATUS_OK {
+            let status = response.get(6).copied();
+
+            return Err(format!(
+                "LCD bridge 0x{command:02X} ACK invalid: {}",
+                status
+                    .map(|value| format!("0x{value:02X}"))
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+
+        Ok(elapsed_ms)
+    }
+
+    fn lcd_bridge_finish(&mut self) -> Result<f64, String> {
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = 0x42;
+
+        let (response, elapsed_ms) = self.transact_raw32(&payload, Duration::from_millis(750))?;
+
+        if response.len() <= 6 || response[6] != STATUS_OK {
+            let status = response.get(6).copied();
+
+            return Err(format!(
+                "LCD bridge FINISH ACK invalid: {}",
+                status
+                    .map(|value| format!("0x{value:02X}"))
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+
+        Ok(elapsed_ms)
+    }
+
+    /// Stream one typed, volatile native RGB565 feedback frame.
+    pub fn lcd_generic_feedback(
+        &mut self,
+        feedback: &crate::lcd_feedback::LcdFeedback,
+    ) -> Result<crate::lcd_feedback::LcdFeedbackTransfer, String> {
+        const GUI_EVENT: [u8; 8] = [0xA5, 0x5A, 0x10, 0x00, 0x01, 0xC5, 0xB1, 0x01];
+
+        const ADD_PIC: [u8; 7] = [0xA5, 0x5A, 0x0C, 0x78, 0x00, 0xC3, 0x93];
+
+        const CHUNK: usize = 25;
+
+        let frame = crate::lcd_feedback::render_feedback_rgb565(*feedback);
+
+        if frame.len() != crate::lcd_feedback::LCD_FRAME_BYTES {
+            return Err(format!("LCD feedback frame size mismatch: {}", frame.len()));
+        }
+
+        let started = std::time::Instant::now();
+        let mut begun = false;
+        let mut chunks = 0usize;
+
+        let result = (|| -> Result<(), String> {
+            self.lcd_bridge_packet(0x40, 0, &GUI_EVENT)?;
+
+            begun = true;
+
+            std::thread::sleep(Duration::from_millis(150));
+
+            self.lcd_bridge_packet(0x41, 0, &ADD_PIC)?;
+
+            chunks += 1;
+
+            for (index, bytes) in frame.chunks(CHUNK).enumerate() {
+                let offset = index * CHUNK;
+
+                self.lcd_bridge_packet(0x41, offset as u16, bytes)?;
+
+                chunks += 1;
+            }
+
+            Ok(())
+        })();
+
+        if begun {
+            let finish = self.lcd_bridge_finish();
+
+            match (&result, finish) {
+                (Ok(()), Err(error)) => {
+                    return Err(error);
+                }
+
+                (Err(_), _) | (Ok(()), Ok(_)) => {}
+            }
+        }
+
+        result?;
+
+        Ok(crate::lcd_feedback::LcdFeedbackTransfer {
+            bytes: frame.len(),
+            chunks,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     pub fn scan_rate_hz(&mut self) -> Result<u32, String> {

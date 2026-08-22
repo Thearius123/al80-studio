@@ -1,3 +1,4 @@
+use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -44,6 +45,7 @@ struct Capabilities {
     rgb_runtime: bool,
     overlay: bool,
     lcd_osd: bool,
+    lcd_feedback: bool,
     audio_watch: bool,
     profiles: bool,
     extension_manifest: String,
@@ -77,6 +79,7 @@ impl Capabilities {
             rgb_runtime: false,
             overlay: false,
             lcd_osd: false,
+            lcd_feedback: false,
             audio_watch: false,
             profiles: false,
             extension_manifest: "NONE".to_string(),
@@ -246,6 +249,7 @@ fn parse_capabilities(response: &str) -> Result<Capabilities, String> {
         rgb_runtime: parse_yes_no(field(&fields, "rgb_runtime"), "rgb_runtime")?,
         overlay: parse_yes_no(field(&fields, "overlay"), "overlay")?,
         lcd_osd: parse_yes_no(field(&fields, "lcd_osd"), "lcd_osd")?,
+        lcd_feedback: parse_yes_no(field(&fields, "lcd_feedback"), "lcd_feedback")?,
         audio_watch: parse_yes_no(field(&fields, "audio_watch"), "audio_watch")?,
         profiles: parse_yes_no(field(&fields, "profiles"), "profiles")?,
         extension_manifest: field(&fields, "extension_manifest")
@@ -492,6 +496,17 @@ fn get_creator_scene_status() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn lcd_feedback(kind: String, value: String) -> Result<String, String> {
+    let feedback = LcdFeedback::parse(&kind, &value)?;
+
+    ipc_request(&format!(
+        "LCD FEEDBACK {} {}",
+        feedback.kind_token(),
+        feedback.value_token(),
+    ))
+}
+
+#[tauri::command]
 fn lcd_home() -> Result<(), String> {
     let response = ipc_request("LCD HOME")?;
 
@@ -534,6 +549,7 @@ pub fn run() {
             apply_creator_scene,
             disable_creator_scene,
             get_creator_scene_status,
+            lcd_feedback,
             lcd_home,
             lcd_preview
         ])

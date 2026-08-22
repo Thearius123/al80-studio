@@ -35,6 +35,7 @@ interface Capabilities {
   rgbRuntime: boolean;
   overlay: boolean;
   lcdOsd: boolean;
+  lcdFeedback: boolean;
   audioWatch: boolean;
   profiles: boolean;
   extensionManifest: string;
@@ -806,7 +807,73 @@ function renderLcd(): string {
           </button>
         </div>
       </article>
-    </section>
+    
+      <article class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Generic transient feedback</p>
+            <h2>Typed LCD feedback</h2>
+          </div>
+        </div>
+
+        <p class="muted">
+          Runtime-only 96×160 RGB565 feedback through al80d.
+          No LCD media is stored on the keyboard.
+        </p>
+
+        ${
+          capabilities?.lcdFeedback === true
+            ? `
+              <div class="control-grid">
+                <label>
+                  <span>Kind</span>
+                  <select id="lcd-feedback-kind">
+                    <option value="PROFILE">Profile</option>
+                    <option value="ACTION">Action</option>
+                    <option value="RGB_BRIGHTNESS">RGB value</option>
+                    <option value="RGB_HUE">RGB hue</option>
+                    <option value="RGB_SPEED">RGB speed</option>
+                    <option value="SNAKE">Snake</option>
+                    <option value="SCENE">Scene</option>
+                    <option value="ROUTER">Router</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Typed value</span>
+                  <input
+                    id="lcd-feedback-value"
+                    value="ON"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+
+              <div class="button-row">
+                <button
+                  type="button"
+                  id="lcd-feedback-preview"
+                  class="primary-btn"
+                >
+                  Preview feedback
+                </button>
+              </div>
+            `
+            : `
+              <p class="muted">
+                Generic LCD feedback requires al80d 0.4.0+.
+              </p>
+            `
+        }
+
+        <p class="muted">
+          V1 exposes typed host feedback. Firmware-side Input
+          Router actions do not yet emit host events, so Studio
+          does not claim automatic per-knob action feedback yet.
+        </p>
+      </article>
+</section>
   `;
 }
 
@@ -1303,6 +1370,42 @@ function bindEvents(): void {
           });
         }, `${ext.name} updated.`);
       });
+    });
+
+  document
+    .querySelector<HTMLButtonElement>(
+      "#lcd-feedback-preview",
+    )
+    ?.addEventListener("click", async () => {
+      const kind =
+        document
+          .querySelector<HTMLSelectElement>(
+            "#lcd-feedback-kind",
+          )
+          ?.value ?? "";
+
+      const value =
+        document
+          .querySelector<HTMLInputElement>(
+            "#lcd-feedback-value",
+          )
+          ?.value.trim() ?? "";
+
+      try {
+        const result = await invoke<string>(
+          "lcd_feedback",
+          {
+            kind,
+            value,
+          },
+        );
+
+        notice = result;
+        render();
+      } catch (error) {
+        notice = String(error);
+        render();
+      }
     });
 
   document

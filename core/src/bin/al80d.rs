@@ -1,3 +1,4 @@
+use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -12,6 +13,20 @@ use al80_core::{Al80, InputAction, InputBinding, InputEvent, InputTrigger};
 
 const SETTLE: Duration = Duration::from_millis(50);
 const HOME_IDLE: Duration = Duration::from_secs(3);
+
+const GENERIC_LCD_IDLE: Duration = Duration::from_millis(2200);
+
+/*
+ * LCD_GENERIC_FEEDBACK_V1
+ *
+ * A delayed generic-HOME must not overwrite a newer Volume/MUTE OSD.
+ */
+static LCD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn lcd_generation_bump() -> u64 {
+    LCD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
 const RECONNECT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,14 +166,43 @@ fn read_volume() -> Result<VolumeState, String> {
     Ok(VolumeState { percent, muted })
 }
 
-fn lcd_home(shared: &SharedDevice) -> Result<(), String> {
+fn lcd_home_direct(shared: &SharedDevice) -> Result<(), String> {
     let mut owner = lock_device(shared)?;
     owner.operation(|device| device.lcd_home())
 }
 
-fn lcd_volume(shared: &SharedDevice, state: VolumeState) -> Result<f64, String> {
+fn lcd_home(shared: &SharedDevice) -> Result<(), String> {
+    lcd_generation_bump();
+    lcd_home_direct(shared)
+}
+
+fn lcd_home_if_generation(shared: &SharedDevice, generation: u64) -> Result<bool, String> {
     let mut owner = lock_device(shared)?;
+
+    if LCD_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+        return Ok(false);
+    }
+
+    owner.operation(|device| device.lcd_home())?;
+
+    Ok(true)
+}
+
+fn lcd_volume(shared: &SharedDevice, state: VolumeState) -> Result<f64, String> {
+    lcd_generation_bump();
+
+    let mut owner = lock_device(shared)?;
+
     owner.operation(|device| device.lcd_volume_osd(state.percent, state.muted))
+}
+
+fn lcd_generic_feedback(
+    shared: &SharedDevice,
+    feedback: &LcdFeedback,
+) -> Result<al80_core::lcd_feedback::LcdFeedbackTransfer, String> {
+    let mut owner = lock_device(shared)?;
+
+    owner.operation(|device| device.lcd_generic_feedback(feedback))
 }
 
 fn status_line(shared: &SharedDevice) -> Result<String, String> {
@@ -197,7 +241,7 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.3.0 ",
+                "OK api=1 daemon=0.4.0 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -213,6 +257,8 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
                 "accent_rgb_leds=3 ",
                 "creator_scene_state={} ",
                 "input_router=YES ",
+                "lcd_feedback=YES ",
+                "lcd_feedback_kinds=8 ",
                 "input_bindings={} ",
                 "input_actions={} ",
                 "input_router_state={} ",
@@ -539,6 +585,48 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
             ))
         }
 
+        ["LCD", "FEEDBACK", kind, value] => {
+            let feedback = LcdFeedback::parse(kind, value)?;
+
+            let kind_out = feedback.kind_token().to_string();
+
+            let value_out = feedback.value_token();
+
+            let generation = lcd_generation_bump();
+
+            let transfer = lcd_generic_feedback(shared, &feedback)?;
+
+            let delayed_shared = Arc::clone(shared);
+
+            std::thread::spawn(move || {
+                std::thread::sleep(GENERIC_LCD_IDLE);
+
+                match lcd_home_if_generation(&delayed_shared, generation) {
+                    Ok(true) => {
+                        println!("AL80D_GENERIC_LCD_HOME=PASS");
+                    }
+
+                    Ok(false) => {
+                        println!("AL80D_GENERIC_LCD_HOME=SKIPPED_NEWER_ACTIVITY");
+                    }
+
+                    Err(error) => {
+                        eprintln!("AL80D_GENERIC_LCD_HOME_ERROR={error}");
+                    }
+                }
+            });
+
+            println!(
+                "AL80D_GENERIC_LCD_SEND={}:{} BYTES={} CHUNKS={} MS={:.3}",
+                kind_out, value_out, transfer.bytes, transfer.chunks, transfer.elapsed_ms,
+            );
+
+            Ok(format!(
+                "OK lcd=FEEDBACK kind={} value={} bytes={} chunks={} elapsed_ms={:.3}",
+                kind_out, value_out, transfer.bytes, transfer.chunks, transfer.elapsed_ms,
+            ))
+        }
+
         ["LCD", "HOME"] => {
             lcd_home(shared)?;
             Ok("OK lcd=HOME".to_string())
@@ -810,7 +898,7 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.3.0");
+    println!("AL80D_VERSION=0.4.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");
