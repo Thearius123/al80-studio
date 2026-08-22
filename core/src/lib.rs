@@ -1,11 +1,12 @@
+pub mod input_event_bridge;
+pub mod raw_hid_session;
+
 pub mod lcd_feedback;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const VID: &str = "28e9";
 pub const PID: &str = "30af";
@@ -190,7 +191,7 @@ pub struct InputRouterStatus {
 }
 
 pub struct Al80 {
-    file: File,
+    session: raw_hid_session::RawHidSession,
     info: DeviceInfo,
 }
 
@@ -270,126 +271,38 @@ impl Al80 {
     pub fn connect() -> Result<Self, String> {
         let info = DeviceInfo::discover()?;
         let file = info.open()?;
+        let session = raw_hid_session::RawHidSession::new(file)?;
 
-        Ok(Self { file, info })
+        Ok(Self { session, info })
     }
 
     pub fn device_info(&self) -> &DeviceInfo {
         &self.info
     }
 
-    fn drain(&mut self) -> Result<(), String> {
-        let mut buffer = [0u8; 64];
 
-        loop {
-            match self.file.read(&mut buffer) {
-                Ok(0) => return Ok(()),
-                Ok(_) => continue,
 
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    return Ok(());
-                }
 
-                Err(e) => {
-                    return Err(format!("Raw HID drain failed: {e}"));
-                }
-            }
-        }
-    }
-
-    fn write_request(&mut self, request: &[u8; LINUX_WRITE_BYTES]) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut offset = 0;
-
-        while offset < request.len() {
-            match self.file.write(&request[offset..]) {
-                Ok(0) => {
-                    return Err("Raw HID write returned zero bytes".to_string());
-                }
-
-                Ok(count) => {
-                    offset += count;
-                }
-
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err("Raw HID write timeout".to_string());
-                    }
-
-                    thread::sleep(Duration::from_millis(2));
-                }
-
-                Err(e) => {
-                    return Err(format!("Raw HID write failed: {e}"));
-                }
-            }
-        }
-
-        Ok(())
-    }
 
     fn transact(&mut self, command: u8, argument: Option<u8>) -> Result<Vec<u8>, String> {
-        self.drain()?;
-
-        let mut request = [0u8; LINUX_WRITE_BYTES];
-
-        // Linux hidraw:
-        // request[0] = report ID 0
-        // request[1] = QMK Raw HID data[0]
-        request[0] = 0;
-        request[1] = command;
+        let mut payload = [0u8; REPORT_BYTES];
+        payload[0] = command;
 
         if let Some(value) = argument {
-            request[2] = value;
+            payload[1] = value;
         }
 
-        self.write_request(&request)?;
+        let (response, _) =
+            self.session.transact(&payload, Duration::from_secs(1))?;
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut buffer = [0u8; 64];
-
-        while Instant::now() < deadline {
-            match self.file.read(&mut buffer) {
-                Ok(0) => {
-                    thread::sleep(Duration::from_millis(2));
-                }
-
-                Ok(count) => {
-                    let payload: &[u8] = if count >= LINUX_WRITE_BYTES && buffer[0] == 0 {
-                        &buffer[1..usize::min(LINUX_WRITE_BYTES, count)]
-                    } else {
-                        &buffer[0..usize::min(REPORT_BYTES, count)]
-                    };
-
-                    if payload.len() < 2 {
-                        continue;
-                    }
-
-                    if payload[0] != command {
-                        continue;
-                    }
-
-                    if payload[1] != STATUS_OK {
-                        return Err(format!(
-                            "0x{command:02X} returned status 0x{:02X}",
-                            payload[1]
-                        ));
-                    }
-
-                    return Ok(payload.to_vec());
-                }
-
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(2));
-                }
-
-                Err(e) => {
-                    return Err(format!("Raw HID read failed: {e}"));
-                }
-            }
+        if response[1] != STATUS_OK {
+            return Err(format!(
+                "0x{command:02X} returned status 0x{:02X}",
+                response[1]
+            ));
         }
 
-        Err(format!("timeout waiting for 0x{command:02X} response"))
+        Ok(response.to_vec())
     }
 
     /// Send one complete 32-byte vendor payload through Linux hidraw.
@@ -401,38 +314,28 @@ impl Al80 {
         payload: &[u8; REPORT_BYTES],
         timeout: Duration,
     ) -> Result<(Vec<u8>, f64), String> {
-        self.drain()?;
+        let (response, elapsed_ms) =
+            self.session.transact(payload, timeout)?;
 
-        let mut request = [0u8; LINUX_WRITE_BYTES];
-        request[0] = 0;
-        request[1..].copy_from_slice(payload);
-
-        let started = Instant::now();
-        self.write_request(&request)?;
-
-        let deadline = started + timeout;
-        let mut buffer = [0u8; 64];
-
-        while Instant::now() < deadline {
-            match self.file.read(&mut buffer) {
-                Ok(0) => {
-                    thread::sleep(Duration::from_micros(400));
-                }
-                Ok(count) => {
-                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    return Ok((buffer[..count].to_vec(), elapsed_ms));
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_micros(400));
-                }
-                Err(e) => {
-                    return Err(format!("Raw HID LCD read failed: {e}"));
-                }
-            }
-        }
-
-        Err("timeout waiting for LCD Raw HID response".to_string())
+        Ok((response.to_vec(), elapsed_ms))
     }
+
+    pub fn pop_input_event(
+        &self,
+    ) -> Result<Option<raw_hid_session::HostInputEvent>, String> {
+        self.session.pop_input_event()
+    }
+
+    pub fn queued_input_events(&self) -> Result<usize, String> {
+        self.session.queued_input_events()
+    }
+
+    pub fn raw_hid_session_stats(
+        &self,
+    ) -> raw_hid_session::RawHidSessionStats {
+        self.session.stats()
+    }
+
 
     /// Return the keyboard LCD to its normal HOME screen.
     pub fn lcd_home(&mut self) -> Result<(), String> {

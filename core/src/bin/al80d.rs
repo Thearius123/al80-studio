@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use al80_core::input_event_bridge::{
+    InputEventKind as BridgeInputEventKind,
+    SequenceObservation,
+    TriggerKind as BridgeTriggerKind,
+};
+use al80_core::raw_hid_session::HostInputEvent;
 use al80_core::{Al80, InputAction, InputBinding, InputEvent, InputTrigger};
 
 const SETTLE: Duration = Duration::from_millis(50);
@@ -22,6 +28,18 @@ const GENERIC_LCD_IDLE: Duration = Duration::from_millis(2200);
  * A delayed generic-HOME must not overwrite a newer Volume/MUTE OSD.
  */
 static LCD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+const INPUT_EVENT_POLL: Duration = Duration::from_millis(5);
+const INPUT_EVENT_NONE: u64 = u64::MAX;
+
+static INPUT_EVENTS_CONSUMED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static INPUT_EVENT_LAST_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(INPUT_EVENT_NONE);
+static INPUT_EVENT_LAST_ACTION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(INPUT_EVENT_NONE);
+static INPUT_EVENT_LAST_FIRMWARE_DROPPED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn lcd_generation_bump() -> u64 {
     LCD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -241,7 +259,7 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.4.0 ",
+                "OK api=1 daemon=0.5.0 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -257,6 +275,9 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
                 "accent_rgb_leds=3 ",
                 "creator_scene_state={} ",
                 "input_router=YES ",
+                "input_event_bridge_host=YES ",
+                "input_event_firmware=NO ",
+                "input_event_auto_lcd=NO ",
                 "lcd_feedback=YES ",
                 "lcd_feedback_kinds=8 ",
                 "input_bindings={} ",
@@ -454,6 +475,8 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
                 if state.rgb_core_enabled { "ON" } else { "OFF" },
             ))
         }
+
+        ["INPUT", "EVENTS"] => input_events_status_line(shared),
 
         ["INPUT", "STATUS"] => {
             let mut owner = lock_device(shared)?;
@@ -670,6 +693,220 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
 
         _ => Err(format!("unknown request: {request}")),
     }
+}
+
+
+fn bridge_event_name(event: BridgeInputEventKind) -> &'static str {
+    match event {
+        BridgeInputEventKind::KnobCcw => "KNOB_CCW",
+        BridgeInputEventKind::KnobCw => "KNOB_CW",
+        BridgeInputEventKind::KnobPress => "KNOB_PRESS",
+    }
+}
+
+fn bridge_trigger_name(trigger: BridgeTriggerKind) -> &'static str {
+    match trigger {
+        BridgeTriggerKind::None => "NONE",
+        BridgeTriggerKind::Layer => "LAYER",
+        BridgeTriggerKind::Matrix => "MATRIX",
+        BridgeTriggerKind::Mods => "MODS",
+    }
+}
+
+fn bridge_action_name(action: u8) -> &'static str {
+    match action {
+        0 => "NONE",
+        1 => "VOLUME_DOWN",
+        2 => "VOLUME_UP",
+        3 => "MUTE",
+        4 => "MEDIA_PREVIOUS",
+        5 => "MEDIA_NEXT",
+        6 => "MEDIA_PLAY_PAUSE",
+        7 => "BRIGHTNESS_DOWN",
+        8 => "BRIGHTNESS_UP",
+        9 => "LEFT",
+        10 => "RIGHT",
+        11 => "UP",
+        12 => "DOWN",
+        13 => "PAGE_UP",
+        14 => "PAGE_DOWN",
+        15 => "RGB_VALUE_DOWN",
+        16 => "RGB_VALUE_UP",
+        17 => "RGB_HUE_DOWN",
+        18 => "RGB_HUE_UP",
+        19 => "RGB_SPEED_DOWN",
+        20 => "RGB_SPEED_UP",
+        21 => "SNAKE_OFF",
+        22 => "SNAKE_ON",
+        23 => "SNAKE_TOGGLE",
+        24 => "CREATOR_SCENE_OFF",
+        _ => "INVALID",
+    }
+}
+
+fn sequence_observation_name(
+    observation: SequenceObservation,
+) -> &'static str {
+    match observation {
+        SequenceObservation::First(_) => "FIRST",
+        SequenceObservation::Consecutive { .. } => "OK",
+        SequenceObservation::Duplicate(_) => "DUPLICATE",
+        SequenceObservation::Gap { .. } => "GAP",
+    }
+}
+
+fn input_event_log_line(host_event: HostInputEvent) -> String {
+    let event = host_event.event;
+
+    format!(
+        concat!(
+            "AL80D_INPUT_EVENT={} SEQ={} SEQ_STATE={} ",
+            "SLOT={} TRIGGER={} A={} B={} ACTION={} ",
+            "ACTION_NAME={} FW_DROPPED={}"
+        ),
+        bridge_event_name(event.event),
+        event.sequence,
+        sequence_observation_name(host_event.sequence),
+        event.slot,
+        bridge_trigger_name(event.trigger),
+        event.trigger_a,
+        event.trigger_b,
+        event.action,
+        bridge_action_name(event.action),
+        event.dropped_counter
+    )
+}
+
+fn record_input_event(host_event: HostInputEvent) {
+    let event = host_event.event;
+
+    INPUT_EVENTS_CONSUMED.fetch_add(
+        1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    INPUT_EVENT_LAST_SEQUENCE.store(
+        event.sequence as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    INPUT_EVENT_LAST_ACTION.store(
+        event.action as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    INPUT_EVENT_LAST_FIRMWARE_DROPPED.store(
+        event.dropped_counter as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    println!("{}", input_event_log_line(host_event));
+}
+
+fn input_events_status_line(shared: &SharedDevice) -> Result<String, String> {
+    let (queued, stats) = {
+        let mut owner = shared
+            .lock()
+            .map_err(|_| "device mutex poisoned".to_string())?;
+
+        owner.operation(|device| {
+            Ok((
+                device.queued_input_events()?,
+                device.raw_hid_session_stats(),
+            ))
+        })?
+    };
+
+    let consumed = INPUT_EVENTS_CONSUMED.load(
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let last_sequence = INPUT_EVENT_LAST_SEQUENCE.load(
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let last_action = INPUT_EVENT_LAST_ACTION.load(
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    let firmware_dropped =
+        INPUT_EVENT_LAST_FIRMWARE_DROPPED.load(
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+    Ok(format!(
+        concat!(
+            "OK input_event_bridge_host=YES ",
+            "firmware_event_emitter=NO ",
+            "auto_lcd=NO queue_capacity=8 ",
+            "received={} consumed={} queued={} ",
+            "malformed={} host_queue_drops={} ",
+            "sequence_gaps={} sequence_duplicates={} ",
+            "last_sequence={} last_action={} ",
+            "firmware_dropped={}"
+        ),
+        stats.events_received,
+        consumed,
+        queued,
+        stats.malformed_events,
+        stats.host_event_queue_drops,
+        stats.sequence_gaps,
+        stats.sequence_duplicates,
+        if last_sequence == INPUT_EVENT_NONE {
+            "NONE".to_string()
+        } else {
+            last_sequence.to_string()
+        },
+        if last_action == INPUT_EVENT_NONE {
+            "NONE".to_string()
+        } else {
+            last_action.to_string()
+        },
+        firmware_dropped
+    ))
+}
+
+fn start_input_event_pump(
+    shared: SharedDevice,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        println!("AL80D_INPUT_EVENT_PUMP=READY");
+        println!("AL80D_INPUT_EVENT_LCD_POLICY=OBSERVE_ONLY");
+
+        loop {
+            let result = {
+                let mut owner = match shared.lock() {
+                    Ok(owner) => owner,
+                    Err(_) => {
+                        eprintln!(
+                            "AL80D_INPUT_EVENT_PUMP_ERROR=device_mutex_poisoned"
+                        );
+                        thread::sleep(RECONNECT);
+                        continue;
+                    }
+                };
+
+                owner.operation(|device| device.pop_input_event())
+            };
+
+            match result {
+                Ok(Some(event)) => {
+                    record_input_event(event);
+                }
+
+                Ok(None) => {
+                    thread::sleep(INPUT_EVENT_POLL);
+                }
+
+                Err(error) => {
+                    eprintln!(
+                        "AL80D_INPUT_EVENT_PUMP_ERROR={error}"
+                    );
+                    thread::sleep(RECONNECT);
+                }
+            }
+        }
+    })
 }
 
 fn handle_client(mut stream: UnixStream, shared: SharedDevice) {
@@ -898,13 +1135,19 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.4.0");
+    println!("AL80D_VERSION=0.5.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");
     println!("AL80D_HOME_IDLE_MS=3000");
+    println!("AL80D_INPUT_EVENT_BRIDGE_HOST=YES");
+    println!("AL80D_INPUT_EVENT_FIRMWARE=NO");
+    println!("AL80D_INPUT_EVENT_AUTO_LCD=NO");
 
     let shared = Arc::new(Mutex::new(DeviceOwner::new()));
+
+    let _input_event_pump =
+        start_input_event_pump(Arc::clone(&shared));
 
     match start_ipc_server(Arc::clone(&shared)) {
         Ok(_ipc) => {}
@@ -927,5 +1170,98 @@ fn main() {
                 thread::sleep(RECONNECT);
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod input_event_pump_tests {
+    use super::*;
+    use al80_core::input_event_bridge::{
+        InputRouterEvent,
+        TriggerKind as BridgeTriggerKind,
+    };
+
+    fn host_event(
+        sequence: u16,
+        event: BridgeInputEventKind,
+        action: u8,
+        observation: SequenceObservation,
+    ) -> HostInputEvent {
+        HostInputEvent {
+            event: InputRouterEvent {
+                sequence,
+                event,
+                slot: 2,
+                trigger: BridgeTriggerKind::Layer,
+                trigger_a: 1,
+                trigger_b: 0,
+                action,
+                dropped_counter: 3,
+            },
+            sequence: observation,
+        }
+    }
+
+    #[test]
+    fn action_names_cover_allowlisted_edges() {
+        assert_eq!(bridge_action_name(0), "NONE");
+        assert_eq!(bridge_action_name(1), "VOLUME_DOWN");
+        assert_eq!(bridge_action_name(24), "CREATOR_SCENE_OFF");
+        assert_eq!(bridge_action_name(25), "INVALID");
+    }
+
+    #[test]
+    fn event_names_are_typed() {
+        assert_eq!(
+            bridge_event_name(BridgeInputEventKind::KnobCcw),
+            "KNOB_CCW"
+        );
+        assert_eq!(
+            bridge_event_name(BridgeInputEventKind::KnobCw),
+            "KNOB_CW"
+        );
+        assert_eq!(
+            bridge_event_name(BridgeInputEventKind::KnobPress),
+            "KNOB_PRESS"
+        );
+    }
+
+    #[test]
+    fn first_event_log_is_stable_and_typed() {
+        let event = host_event(
+            42,
+            BridgeInputEventKind::KnobCw,
+            22,
+            SequenceObservation::First(42),
+        );
+
+        let line = input_event_log_line(event);
+
+        assert!(line.contains("AL80D_INPUT_EVENT=KNOB_CW"));
+        assert!(line.contains("SEQ=42"));
+        assert!(line.contains("SEQ_STATE=FIRST"));
+        assert!(line.contains("ACTION=22"));
+        assert!(line.contains("ACTION_NAME=SNAKE_ON"));
+        assert!(line.contains("FW_DROPPED=3"));
+    }
+
+    #[test]
+    fn gap_event_log_is_nonfatal_observability() {
+        let event = host_event(
+            103,
+            BridgeInputEventKind::KnobPress,
+            24,
+            SequenceObservation::Gap {
+                previous: 100,
+                expected: 101,
+                current: 103,
+            },
+        );
+
+        let line = input_event_log_line(event);
+
+        assert!(line.contains("SEQ_STATE=GAP"));
+        assert!(line.contains("ACTION_NAME=CREATOR_SCENE_OFF"));
     }
 }
