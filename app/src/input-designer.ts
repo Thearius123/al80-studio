@@ -771,6 +771,18 @@ export function getSavedInputProfilesForHost(): HostProfileInputOption[] {
   }));
 }
 
+export function getCurrentInputDraftForHost(): HostProfileInputBinding[] {
+  return bindings.map(
+    ({ event, trigger, triggerA, triggerB, action }) => ({
+      event,
+      trigger,
+      triggerA,
+      triggerB,
+      action,
+    }),
+  );
+}
+
 export function replaceInputDraftFromHost(
   next: HostProfileInputBinding[],
 ): void {

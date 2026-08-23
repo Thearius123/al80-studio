@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
 import {
   bindInputDesignerEvents,
+  getCurrentInputDraftForHost,
   getSavedInputProfilesForHost,
   refreshInputDesigner,
   renderInputDesigner,
@@ -215,6 +216,7 @@ let creatorPaintColor = "#7c83ff";
 let creatorTool: CreatorTool = "paint";
 let creatorSelected = new Set<number>();
 let creatorHistory: string[][] = [];
+let creatorInputSource = "draft";
 let savedCreatorScenes: SavedCreatorScene[] = loadCreatorScenes();
 let profiles: HostProfile[] = loadProfiles();
 let busy = false;
@@ -773,6 +775,23 @@ function renderCreator(): string {
     && capabilities?.creatorScene === true
     && capabilities?.rgbLeds === 82;
 
+  const unifiedInputProfiles = getSavedInputProfilesForHost();
+  const unifiedInputOptions = unifiedInputProfiles
+    .map(
+      (profile) =>
+        `<option value="saved:${esc(profile.id)}" ${
+          creatorInputSource === `saved:${profile.id}` ? "selected" : ""
+        }>${esc(profile.name)}</option>`,
+    )
+    .join("");
+
+  const creatorLive =
+    capabilities?.creatorSceneState === true;
+  const inputLive =
+    capabilities?.inputRouterState === true;
+  const autoLcdReady =
+    capabilities?.inputEventAutoLcd === true;
+
   if (!creatorLayout) {
     return `<section class="page"><div class="page-heading"><div><p class="eyebrow">Creator Mode</p><h1>Keyboard Painter</h1><p>Loading AL80 physical LED map…</p></div></div></section>`;
   }
@@ -798,6 +817,82 @@ function renderCreator(): string {
     : `<div class="creator-empty-scenes">No saved scenes yet.</div>`;
 
   return `<section class="page">
+      <article class="panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">Unified Creator Session</p>
+            <h2>Scene + Input behavior</h2>
+          </div>
+          ${badge(
+            creatorLive && inputLive
+              ? "Creator + Input live"
+              : creatorLive
+                ? "Creator live"
+                : inputLive
+                  ? "Input live"
+                  : "Workspace idle",
+            creatorLive || inputLive ? "good" : "neutral",
+          )}
+        </div>
+
+        <div class="control-grid">
+          <label>
+            <span>Input behavior</span>
+            <select id="creator-input-source">
+              <option value="off" ${
+                creatorInputSource === "off" ? "selected" : ""
+              }>Router OFF</option>
+              <option value="draft" ${
+                creatorInputSource === "draft" ? "selected" : ""
+              }>Current Input Designer draft</option>
+              ${unifiedInputOptions}
+            </select>
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button
+            id="creator-apply-unified"
+            class="primary-btn"
+            type="button"
+            ${!supported || busy ? "disabled" : ""}
+          >
+            Apply unified workspace
+          </button>
+
+          <button
+            id="creator-exit-unified"
+            class="secondary-btn"
+            type="button"
+            ${!supported || busy ? "disabled" : ""}
+          >
+            Exit unified workspace
+          </button>
+        </div>
+
+        <div class="input-safety-grid">
+          <span>
+            <strong>${creatorLive ? "ON" : "OFF"}</strong>
+            Creator Scene
+          </span>
+          <span>
+            <strong>${inputLive ? "ON" : "OFF"}</strong>
+            Input Router
+          </span>
+          <span>
+            <strong>${autoLcdReady ? "YES" : "NO"}</strong>
+            Automatic LCD
+          </span>
+        </div>
+
+        <p class="muted">
+          Apply sends the current 82-LED painting and the selected typed
+          Input behavior through the existing al80d APIs. Current draft uses
+          the bindings already designed in Inputs. Exit disables Creator Scene
+          and Input Router together, returning to normal RGB/Snake behavior.
+        </p>
+      </article>
+
     <div class="page-heading"><div><p class="eyebrow">Per-key RGB Creator</p><h1>Keyboard Painter</h1><p>Paint any of the 79 key LEDs and 3 accent LEDs. Upload is atomic through the physically validated 0x4A protocol and remains RAM-only.</p></div>${badge(supported ? "Creator Protocol Ready" : "Creator unavailable", supported ? "good" : "warn")}</div>
     <article class="panel creator-toolbar"><label class="creator-color-control"><span>Color</span><input id="creator-color" type="color" value="${esc(creatorPaintColor)}"/><code>${esc(creatorPaintColor)}</code></label><div class="creator-tool-group"><button class="secondary-btn creator-tool ${creatorTool === "paint" ? "tool-active" : ""}" data-creator-tool="paint" type="button">Paint</button><button class="secondary-btn creator-tool ${creatorTool === "select" ? "tool-active" : ""}" data-creator-tool="select" type="button">Select</button><button id="creator-apply-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Color selected (${creatorSelected.size})</button><button id="creator-clear-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Clear selection</button></div></article>
     <article class="panel"><div class="creator-actions"><button id="creator-wasd-demo" class="secondary-btn" type="button">WASD demo</button><button id="creator-fill" class="secondary-btn" type="button">Fill all</button><button id="creator-black" class="secondary-btn" type="button">All off</button><button id="creator-white" class="secondary-btn" type="button">All white</button><button id="creator-undo" class="secondary-btn" type="button" ${creatorHistory.length === 0 ? "disabled" : ""}>Undo</button><button id="creator-save" class="secondary-btn" type="button">Save scene</button><button id="creator-apply" class="primary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Apply to keyboard</button><button id="creator-disable" class="secondary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Exit Creator</button></div></article>
@@ -1382,6 +1477,72 @@ function bindEvents(): void {
       render();
     },
   });
+
+  document
+    .querySelector<HTMLSelectElement>("#creator-input-source")
+    ?.addEventListener("change", (event) => {
+      creatorInputSource =
+        (event.currentTarget as HTMLSelectElement).value;
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-apply-unified")
+    ?.addEventListener("click", () => {
+      void action(async () => {
+        let inputBindings: HostProfileInputBinding[] | null = null;
+
+        if (creatorInputSource === "draft") {
+          inputBindings = getCurrentInputDraftForHost();
+        } else if (creatorInputSource.startsWith("saved:")) {
+          const profileId = creatorInputSource.slice("saved:".length);
+          const profile = getSavedInputProfilesForHost().find(
+            (item) => item.id === profileId,
+          );
+
+          if (!profile) {
+            throw new Error("Selected Input profile no longer exists");
+          }
+
+          inputBindings = profile.bindings;
+        } else if (creatorInputSource !== "off") {
+          throw new Error("Unknown Creator Input source");
+        }
+
+        await invoke<boolean>("set_rgb_core_runtime", {
+          enabled: true,
+        });
+
+        await invoke<string>("apply_creator_scene", {
+          colors: creatorColors,
+        });
+
+        if (inputBindings === null) {
+          await invoke<string>("disable_input_router");
+        } else {
+          if (
+            inputBindings.length === 0 ||
+            inputBindings.length > 12
+          ) {
+            throw new Error(
+              "Creator Input behavior must contain 1..12 bindings",
+            );
+          }
+
+          await invoke<string>("apply_input_profile", {
+            bindings: inputBindings,
+          });
+        }
+      }, "Unified Creator workspace applied.");
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-exit-unified")
+    ?.addEventListener("click", () => {
+      void action(async () => {
+        await invoke<string>("disable_creator_scene");
+        await invoke<string>("disable_input_router");
+      }, "Unified Creator workspace exited.");
+    });
 
   document
     .querySelector<HTMLInputElement>("#creator-color")
