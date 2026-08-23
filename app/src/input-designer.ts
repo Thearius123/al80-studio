@@ -5,6 +5,9 @@ export interface InputDesignerCapabilities {
   inputBindings?: number;
   inputActions?: number;
   inputRouterState?: boolean | null;
+  inputEventBridgeHost?: boolean;
+  inputEventFirmware?: boolean;
+  inputEventAutoLcd?: boolean;
 }
 
 interface LayoutItem {
@@ -99,6 +102,7 @@ let registry: ActionRegistry | null = null;
 let bindings: InputBindingDraft[] = loadDraft();
 let profiles: SavedInputProfile[] = loadProfiles();
 let keyPickerBindingId: string | null = null;
+let inputEventStatus: string | null = null;
 
 function makeId(): string {
   if (typeof crypto.randomUUID === "function") {
@@ -114,6 +118,29 @@ function safe(value: unknown): string {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function inputEventField(name: string): string | null {
+  if (!inputEventStatus) return null;
+
+  for (const token of inputEventStatus.split(/\s+/)) {
+    const index = token.indexOf("=");
+    if (index <= 0) continue;
+
+    if (token.slice(0, index) === name) {
+      return token.slice(index + 1);
+    }
+  }
+
+  return null;
+}
+
+function inputEventNumber(name: string): number | null {
+  const raw = inputEventField(name);
+  if (raw === null) return null;
+
+  const value = Number(raw);
+  return Number.isInteger(value) ? value : null;
 }
 
 function defaultBindings(): InputBindingDraft[] {
@@ -453,10 +480,15 @@ function profilesHtml(): string {
     .join("");
 }
 
-export async function refreshInputDesigner(): Promise<void> {
-  const [layoutResponse, actionResponse] = await Promise.all([
+export async function refreshInputDesigner(
+  capabilities: InputDesignerCapabilities | null = null,
+): Promise<void> {
+  const [layoutResponse, actionResponse, nextInputEventStatus] = await Promise.all([
     fetch("./devices/al80/layout.json", { cache: "no-store" }),
     fetch("./devices/al80/input-actions.json", { cache: "no-store" }),
+    capabilities?.inputEventBridgeHost === true
+      ? invoke<string>("get_input_event_status")
+      : Promise.resolve(null),
   ]);
 
   if (!layoutResponse.ok) {
@@ -491,6 +523,7 @@ export async function refreshInputDesigner(): Promise<void> {
 
   layout = nextLayout;
   registry = nextRegistry;
+  inputEventStatus = nextInputEventStatus;
   bindings = loadDraft();
   profiles = loadProfiles();
 }
@@ -503,6 +536,15 @@ export function renderInputDesigner(
   const routerOn = capabilities?.inputRouterState === true;
   const slotLimit = capabilities?.inputBindings ?? 12;
   const actionLimit = capabilities?.inputActions ?? 24;
+  const eventBridgeReady =
+    capabilities?.inputEventBridgeHost === true &&
+    capabilities?.inputEventFirmware === true;
+  const automaticLcdReady = capabilities?.inputEventAutoLcd === true;
+  const received = inputEventNumber("received") ?? 0;
+  const consumed = inputEventNumber("consumed") ?? 0;
+  const cancelled = inputEventNumber("auto_lcd_cancelled") ?? 0;
+  const lcdErrors = inputEventNumber("auto_lcd_errors") ?? 0;
+  const lastAction = inputEventField("last_action") ?? "NONE";
 
   return `
     <section class="page input-designer-page">
@@ -530,6 +572,33 @@ export function renderInputDesigner(
             <button id="input-apply" class="primary-btn" type="button" ${!supported || busy || bindings.length === 0 ? "disabled" : ""}>Apply profile</button>
           </div>
         </div>
+      </article>
+
+      <article class="panel input-safety-panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">Live al80d 0.6 path</p>
+            <h2>Input Event Bridge + Automatic LCD</h2>
+          </div>
+          <span class="badge ${automaticLcdReady ? "good" : "neutral"}">
+            ${automaticLcdReady ? "Auto-LCD ready" : "Auto-LCD unavailable"}
+          </span>
+        </div>
+
+        <div class="input-safety-grid">
+          <span><strong>${eventBridgeReady ? "YES" : "NO"}</strong> Event bridge</span>
+          <span><strong>${received}</strong> Events received</span>
+          <span><strong>${consumed}</strong> Events consumed</span>
+          <span><strong>${safe(lastAction)}</strong> Last action</span>
+          <span><strong>${cancelled}</strong> LCD preemptions</span>
+          <span><strong>${lcdErrors}</strong> LCD errors</span>
+        </div>
+
+        <p class="muted">
+          ${automaticLcdReady
+            ? "Applied Input Designer rules execute in firmware and emit typed 0x4C events to al80d. Volume/Mute display the actual Fedora audio state; other allowlisted actions use automatic typed LCD feedback. Generic LCD frames are cancellable so newer audio feedback wins."
+            : "This runtime does not advertise the physically validated automatic LCD event path."}
+        </p>
       </article>
 
       <article class="panel">

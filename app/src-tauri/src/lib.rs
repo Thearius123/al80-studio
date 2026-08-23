@@ -59,6 +59,9 @@ struct Capabilities {
     input_bindings: u32,
     input_actions: u32,
     input_router_state: Option<bool>,
+    input_event_bridge_host: bool,
+    input_event_firmware: bool,
+    input_event_auto_lcd: bool,
     persistent_write: bool,
     eeprom_write: bool,
     qmk_flash: bool,
@@ -93,6 +96,9 @@ impl Capabilities {
             input_bindings: 0,
             input_actions: 0,
             input_router_state: None,
+            input_event_bridge_host: false,
+            input_event_firmware: false,
+            input_event_auto_lcd: false,
             persistent_write: false,
             eeprom_write: false,
             qmk_flash: false,
@@ -286,6 +292,18 @@ fn parse_capabilities(response: &str) -> Result<Capabilities, String> {
             Some(value) => Some(parse_on_off(Some(value), "input_router_state")?),
             None => None,
         },
+        input_event_bridge_host: parse_yes_no(
+            field(&fields, "input_event_bridge_host"),
+            "input_event_bridge_host",
+        )?,
+        input_event_firmware: parse_yes_no(
+            field(&fields, "input_event_firmware"),
+            "input_event_firmware",
+        )?,
+        input_event_auto_lcd: parse_yes_no(
+            field(&fields, "input_event_auto_lcd"),
+            "input_event_auto_lcd",
+        )?,
         persistent_write: parse_yes_no(field(&fields, "persistent_write"), "persistent_write")?,
         eeprom_write: parse_yes_no(field(&fields, "eeprom_write"), "eeprom_write")?,
         qmk_flash: parse_yes_no(field(&fields, "qmk_flash"), "qmk_flash")?,
@@ -430,6 +448,11 @@ fn get_input_router_dump() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_input_event_status() -> Result<String, String> {
+    ipc_request("INPUT EVENTS")
+}
+
+#[tauri::command]
 fn disable_input_router() -> Result<String, String> {
     ipc_request("INPUT OFF")
 }
@@ -543,6 +566,7 @@ pub fn run() {
             run_safe_extension_command,
             get_input_router_status,
             get_input_router_dump,
+            get_input_event_status,
             disable_input_router,
             restore_input_defaults,
             apply_input_profile,

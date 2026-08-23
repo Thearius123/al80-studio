@@ -49,6 +49,9 @@ interface Capabilities {
   inputBindings: number;
   inputActions: number;
   inputRouterState: boolean | null;
+  inputEventBridgeHost: boolean;
+  inputEventFirmware: boolean;
+  inputEventAutoLcd: boolean;
   persistentWrite: boolean;
   eepromWrite: boolean;
   qmkFlash: boolean;
@@ -868,9 +871,11 @@ function renderLcd(): string {
         }
 
         <p class="muted">
-          V1 exposes typed host feedback. Firmware-side Input
-          Router actions do not yet emit host events, so Studio
-          does not claim automatic per-knob action feedback yet.
+          ${
+            capabilities?.inputEventAutoLcd === true
+              ? "Automatic per-knob LCD feedback is active through the physically validated 0x4C Event Bridge. Volume/Mute use the actual Fedora audio state; other allowlisted actions use typed automatic LCD feedback."
+              : "Typed host LCD preview is available, but this runtime does not advertise automatic per-knob action feedback."
+          }
         </p>
       </article>
 </section>
@@ -1114,7 +1119,7 @@ async function refresh(message = ""): Promise<void> {
     capabilities = nextCaps;
     registry = nextRegistry;
     creatorLayout = nextCreatorLayout;
-    await refreshInputDesigner();
+    await refreshInputDesigner(nextCaps);
     profiles = loadProfiles();
     savedCreatorScenes = loadCreatorScenes();
 
