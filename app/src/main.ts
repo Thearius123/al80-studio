@@ -2,8 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
 import {
   bindInputDesignerEvents,
+  getSavedInputProfilesForHost,
   refreshInputDesigner,
   renderInputDesigner,
+  replaceInputDraftFromHost,
+  type HostProfileInputBinding,
 } from "./input-designer";
 
 type View =
@@ -166,11 +169,24 @@ interface SavedCreatorScene {
 
 type CreatorTool = "paint" | "select";
 
+interface HostProfileCreatorScene {
+  name: string;
+  colors: string[];
+}
+
+interface HostProfileInputSnapshot {
+  name: string;
+  bindings: HostProfileInputBinding[];
+}
+
 interface HostProfile {
+  schemaVersion: 1 | 2;
   id: string;
   name: string;
   rgbEnabled: boolean;
   overlayEnabled: boolean;
+  creatorScene?: HostProfileCreatorScene | null;
+  inputProfile?: HostProfileInputSnapshot | null;
   createdAt: string;
 }
 
@@ -303,34 +319,134 @@ function creatorWasdDemo(): void {
   creatorLayout.accents.forEach((accent, index) => paintCreatorLed(accent.ledIndex, accentColors[index] ?? "#ffffff"));
 }
 
+function validProfileCreatorScene(
+  value: unknown,
+): value is HostProfileCreatorScene {
+  if (typeof value !== "object" || value === null) return false;
+
+  const scene = value as Partial<HostProfileCreatorScene>;
+
+  return (
+    typeof scene.name === "string" &&
+    Array.isArray(scene.colors) &&
+    scene.colors.length === 82 &&
+    scene.colors.every(
+      (color) =>
+        typeof color === "string" &&
+        /^#[0-9a-fA-F]{6}$/.test(color),
+    )
+  );
+}
+
+function validProfileInputSnapshot(
+  value: unknown,
+): value is HostProfileInputSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+
+  const input = value as Partial<HostProfileInputSnapshot>;
+
+  if (
+    typeof input.name !== "string" ||
+    !Array.isArray(input.bindings) ||
+    input.bindings.length === 0 ||
+    input.bindings.length > 12
+  ) {
+    return false;
+  }
+
+  return input.bindings.every((binding) => {
+    if (typeof binding !== "object" || binding === null) return false;
+
+    const item = binding as Partial<HostProfileInputBinding>;
+
+    return (
+      Number.isInteger(item.event) &&
+      Number.isInteger(item.trigger) &&
+      Number.isInteger(item.triggerA) &&
+      Number.isInteger(item.triggerB) &&
+      Number.isInteger(item.action)
+    );
+  });
+}
+
 function loadProfiles(): HostProfile[] {
   try {
     const raw = localStorage.getItem(PROFILE_KEY);
 
-    if (!raw) {
-      return [];
-    }
+    if (!raw) return [];
 
     const parsed = JSON.parse(raw) as unknown;
 
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
+    if (!Array.isArray(parsed)) return [];
 
-    return parsed.filter((item): item is HostProfile => {
-      if (typeof item !== "object" || item === null) {
-        return false;
-      }
+    return parsed.flatMap((item): HostProfile[] => {
+      if (typeof item !== "object" || item === null) return [];
 
       const profile = item as Partial<HostProfile>;
 
-      return (
-        typeof profile.id === "string" &&
-        typeof profile.name === "string" &&
-        typeof profile.rgbEnabled === "boolean" &&
-        typeof profile.overlayEnabled === "boolean" &&
-        typeof profile.createdAt === "string"
-      );
+      if (
+        typeof profile.id !== "string" ||
+        typeof profile.name !== "string" ||
+        typeof profile.rgbEnabled !== "boolean" ||
+        typeof profile.overlayEnabled !== "boolean" ||
+        typeof profile.createdAt !== "string"
+      ) {
+        return [];
+      }
+
+      if (profile.schemaVersion === 2) {
+        const creatorScene =
+          profile.creatorScene === null
+            ? null
+            : validProfileCreatorScene(profile.creatorScene)
+              ? {
+                  name: profile.creatorScene.name,
+                  colors: profile.creatorScene.colors.map(normalizeHexColor),
+                }
+              : undefined;
+
+        const inputProfile =
+          profile.inputProfile === null
+            ? null
+            : validProfileInputSnapshot(profile.inputProfile)
+              ? {
+                  name: profile.inputProfile.name,
+                  bindings: profile.inputProfile.bindings.map((binding) => ({
+                    ...binding,
+                  })),
+                }
+              : undefined;
+
+        if (creatorScene === undefined || inputProfile === undefined) {
+          return [];
+        }
+
+        return [
+          {
+            schemaVersion: 2,
+            id: profile.id,
+            name: profile.name,
+            rgbEnabled: profile.rgbEnabled,
+            overlayEnabled: profile.overlayEnabled,
+            creatorScene,
+            inputProfile,
+            createdAt: profile.createdAt,
+          },
+        ];
+      }
+
+      // Backward-compatible Host Profiles V1 keep their historical
+      // behavior: they change only RGB + overlay and preserve Creator/Input.
+      return [
+        {
+          schemaVersion: 1,
+          id: profile.id,
+          name: profile.name,
+          rgbEnabled: profile.rgbEnabled,
+          overlayEnabled: profile.overlayEnabled,
+          createdAt: profile.createdAt,
+        },
+      ];
     });
   } catch {
     return [];
@@ -883,6 +999,22 @@ function renderLcd(): string {
 }
 
 function renderProfiles(): string {
+  const inputOptions = getSavedInputProfilesForHost();
+
+  const creatorOptions = savedCreatorScenes
+    .map(
+      (scene) =>
+        `<option value="${esc(scene.id)}">${esc(scene.name)}</option>`,
+    )
+    .join("");
+
+  const inputProfileOptions = inputOptions
+    .map(
+      (profile) =>
+        `<option value="${esc(profile.id)}">${esc(profile.name)}</option>`,
+    )
+    .join("");
+
   const cards =
     profiles.length === 0
       ? `
@@ -890,7 +1022,8 @@ function renderProfiles(): string {
           <div class="placeholder-plus">+</div>
           <h2>No host profiles yet</h2>
           <p class="muted">
-            Save the current RGB and effect state to create your first one.
+            Compose RGB/Snake with an optional saved Creator scene and
+            saved Input profile.
           </p>
         </article>
       `
@@ -899,11 +1032,31 @@ function renderProfiles(): string {
             (profile) => `
               <article class="profile-card">
                 <div>
-                  <p class="eyebrow">Host profile</p>
+                  <p class="eyebrow">
+                    Host profile ${profile.schemaVersion === 2 ? "V2" : "V1"}
+                  </p>
                   <h2>${esc(profile.name)}</h2>
                   <div class="chip-row">
                     ${badge(`RGB ${profile.rgbEnabled ? "ON" : "OFF"}`)}
                     ${badge(`Snake ${profile.overlayEnabled ? "ON" : "OFF"}`)}
+                    ${
+                      profile.schemaVersion === 2
+                        ? badge(
+                            profile.creatorScene
+                              ? `Creator ${profile.creatorScene.name}`
+                              : "Creator OFF",
+                          )
+                        : badge("Creator preserve")
+                    }
+                    ${
+                      profile.schemaVersion === 2
+                        ? badge(
+                            profile.inputProfile
+                              ? `Input ${profile.inputProfile.name}`
+                              : "Input OFF",
+                          )
+                        : badge("Input preserve")
+                    }
                   </div>
                   <small>${esc(profile.createdAt)}</small>
                 </div>
@@ -939,20 +1092,56 @@ function renderProfiles(): string {
           <p class="eyebrow">Configuration</p>
           <h1>Profiles</h1>
           <p>
-            Host Profiles V1 save safe runtime state locally in AL80 Studio.
-            They do not write EEPROM or persist settings into keyboard flash.
+            Host Profiles V2 compose safe volatile features into one preset:
+            RGB/Snake, a saved Creator scene and a saved Input profile.
           </p>
         </div>
-
-        <button
-          id="profile-save"
-          class="primary-btn"
-          type="button"
-          ${!status?.connected || busy ? "disabled" : ""}
-        >
-          Save current state
-        </button>
       </div>
+
+      <article class="panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">New Host Profile V2</p>
+            <h2>Compose saved components</h2>
+          </div>
+          ${badge("Host-local / volatile hardware", "good")}
+        </div>
+
+        <div class="control-grid">
+          <label>
+            <span>Creator scene</span>
+            <select id="profile-creator-source">
+              <option value="">OFF</option>
+              ${creatorOptions}
+            </select>
+          </label>
+
+          <label>
+            <span>Input profile</span>
+            <select id="profile-input-source">
+              <option value="">Router OFF</option>
+              ${inputProfileOptions}
+            </select>
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button
+            id="profile-save"
+            class="primary-btn"
+            type="button"
+            ${!status?.connected || busy ? "disabled" : ""}
+          >
+            Save current RGB/Snake + selections
+          </button>
+        </div>
+
+        <p class="muted">
+          Creator and Input selections are copied into the Host Profile, so
+          applying it does not depend on the source item remaining in its
+          separate library. Legacy V1 profiles keep their original behavior.
+        </p>
+      </article>
 
       <div class="profile-grid">
         ${cards}
@@ -961,8 +1150,8 @@ function renderProfiles(): string {
       <article class="panel">
         <p class="muted">
           al80d still reports <code>profiles=NO</code> because firmware-side
-          profiles do not exist yet. Host Profiles are intentionally a
-          separate safe layer.
+          profiles do not exist. Host Profiles V2 orchestrate only existing,
+          validated volatile APIs through al80d.
         </p>
       </article>
     </section>
@@ -1450,24 +1639,71 @@ function bindEvents(): void {
   document
     .querySelector<HTMLButtonElement>("#profile-save")
     ?.addEventListener("click", () => {
-      if (!status?.connected) return;
-
       const suggested = `Profile ${profiles.length + 1}`;
       const name = window.prompt("Profile name", suggested)?.trim();
 
       if (!name) return;
 
+      const creatorId =
+        document
+          .querySelector<HTMLSelectElement>("#profile-creator-source")
+          ?.value ?? "";
+
+      const inputId =
+        document
+          .querySelector<HTMLSelectElement>("#profile-input-source")
+          ?.value ?? "";
+
+      const creatorSource =
+        creatorId.length > 0
+          ? savedCreatorScenes.find((scene) => scene.id === creatorId)
+          : undefined;
+
+      const inputSource =
+        inputId.length > 0
+          ? getSavedInputProfilesForHost().find(
+              (profile) => profile.id === inputId,
+            )
+          : undefined;
+
+      if (creatorId.length > 0 && !creatorSource) {
+        notice = "Selected Creator scene no longer exists.";
+        render();
+        return;
+      }
+
+      if (inputId.length > 0 && !inputSource) {
+        notice = "Selected Input profile no longer exists.";
+        render();
+        return;
+      }
+
       const profile: HostProfile = {
+        schemaVersion: 2,
         id: crypto.randomUUID(),
         name,
-        rgbEnabled: status.rgbCoreEnabled === true,
-        overlayEnabled: status.overlayEnabled === true,
+        rgbEnabled: status?.rgbCoreEnabled === true,
+        overlayEnabled: status?.overlayEnabled === true,
+        creatorScene: creatorSource
+          ? {
+              name: creatorSource.name,
+              colors: [...creatorSource.colors],
+            }
+          : null,
+        inputProfile: inputSource
+          ? {
+              name: inputSource.name,
+              bindings: inputSource.bindings.map((binding) => ({
+                ...binding,
+              })),
+            }
+          : null,
         createdAt: new Date().toLocaleString(),
       };
 
       profiles = [...profiles, profile];
       saveProfiles();
-      notice = `Saved ${name}.`;
+      notice = `Saved Host Profile V2 ${name}.`;
       render();
     });
 
@@ -1500,6 +1736,30 @@ function bindEvents(): void {
             await invoke<boolean>("set_rgb_core_runtime", {
               enabled: false,
             });
+          }
+
+          if (profile.schemaVersion === 2) {
+            if (profile.creatorScene) {
+              creatorColors = [...profile.creatorScene.colors];
+
+              await invoke<string>("apply_creator_scene", {
+                colors: profile.creatorScene.colors,
+              });
+            } else {
+              await invoke<string>("disable_creator_scene");
+            }
+
+            if (profile.inputProfile) {
+              await invoke<string>("apply_input_profile", {
+                bindings: profile.inputProfile.bindings,
+              });
+
+              replaceInputDraftFromHost(
+                profile.inputProfile.bindings,
+              );
+            } else {
+              await invoke<string>("disable_input_router");
+            }
           }
         }, `Applied ${profile.name}.`);
       });

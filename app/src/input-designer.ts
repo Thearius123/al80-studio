@@ -59,6 +59,21 @@ interface SavedInputProfile {
   createdAt: string;
 }
 
+export interface HostProfileInputBinding {
+  event: number;
+  trigger: number;
+  triggerA: number;
+  triggerB: number;
+  action: number;
+}
+
+export interface HostProfileInputOption {
+  id: string;
+  name: string;
+  bindings: HostProfileInputBinding[];
+  createdAt: string;
+}
+
 export interface InputDesignerEventContext {
   capabilities: InputDesignerCapabilities | null;
   busy: boolean;
@@ -737,6 +752,83 @@ function encodedBindings(): Array<{
     triggerB,
     action,
   }));
+}
+
+export function getSavedInputProfilesForHost(): HostProfileInputOption[] {
+  return profiles.map((profile) => ({
+    id: profile.id,
+    name: profile.name,
+    createdAt: profile.createdAt,
+    bindings: profile.bindings.map(
+      ({ event, trigger, triggerA, triggerB, action }) => ({
+        event,
+        trigger,
+        triggerA,
+        triggerB,
+        action,
+      }),
+    ),
+  }));
+}
+
+export function replaceInputDraftFromHost(
+  next: HostProfileInputBinding[],
+): void {
+  if (next.length === 0 || next.length > 12) {
+    throw new Error("Host profile input bindings must contain 1..12 rules");
+  }
+
+  const rebuilt: InputBindingDraft[] = next.map((item, index) => {
+    if (!Number.isInteger(item.event) || item.event < 1 || item.event > 3) {
+      throw new Error(`Host profile binding ${index} has invalid event`);
+    }
+
+    if (!Number.isInteger(item.trigger) || item.trigger < 0 || item.trigger > 3) {
+      throw new Error(`Host profile binding ${index} has invalid trigger`);
+    }
+
+    if (!Number.isInteger(item.action) || item.action < 0 || item.action > 24) {
+      throw new Error(`Host profile binding ${index} has invalid action`);
+    }
+
+    if (
+      !Number.isInteger(item.triggerA) ||
+      !Number.isInteger(item.triggerB) ||
+      item.triggerA < 0 ||
+      item.triggerA > 255 ||
+      item.triggerB < 0 ||
+      item.triggerB > 255
+    ) {
+      throw new Error(`Host profile binding ${index} has invalid trigger data`);
+    }
+
+    if (item.trigger === 0 && (item.triggerA !== 0 || item.triggerB !== 0)) {
+      throw new Error(`Host profile binding ${index}: Always requires A=0/B=0`);
+    }
+
+    if (item.trigger === 1 && (item.triggerA > 31 || item.triggerB !== 0)) {
+      throw new Error(`Host profile binding ${index}: Layer requires 0..31/B=0`);
+    }
+
+    if (item.trigger === 3 && (item.triggerA === 0 || item.triggerB !== 0)) {
+      throw new Error(
+        `Host profile binding ${index}: Modifiers requires nonzero mask/B=0`,
+      );
+    }
+
+    return {
+      id: makeId(),
+      event: item.event,
+      trigger: item.trigger,
+      triggerA: item.triggerA,
+      triggerB: item.triggerB,
+      action: item.action,
+    };
+  });
+
+  bindings = rebuilt;
+  keyPickerBindingId = null;
+  saveDraft();
 }
 
 function parseDump(response: string): InputBindingDraft[] {
