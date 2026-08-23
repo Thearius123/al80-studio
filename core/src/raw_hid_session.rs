@@ -15,7 +15,7 @@ use crate::input_event_bridge::{
 const REPORT_WITH_ID_BYTES: usize = EVENT_REPORT_BYTES + 1;
 const REPORT_ID: u8 = 0;
 const IDLE_POLL: Duration = Duration::from_millis(1);
-const WRITE_RETRY_SLEEP: Duration = Duration::from_millis(1);
+const WRITE_RETRY_SLEEP: Duration = Duration::from_millis(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const CALLER_GRACE: Duration = Duration::from_millis(250);
 

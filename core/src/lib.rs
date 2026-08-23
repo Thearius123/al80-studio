@@ -1,6 +1,7 @@
 pub mod input_event_bridge;
 pub mod raw_hid_session;
 
+pub mod auto_lcd_feedback;
 pub mod lcd_feedback;
 
 use std::fs::{self, File, OpenOptions};
@@ -280,10 +281,6 @@ impl Al80 {
         &self.info
     }
 
-
-
-
-
     fn transact(&mut self, command: u8, argument: Option<u8>) -> Result<Vec<u8>, String> {
         let mut payload = [0u8; REPORT_BYTES];
         payload[0] = command;
@@ -292,8 +289,7 @@ impl Al80 {
             payload[1] = value;
         }
 
-        let (response, _) =
-            self.session.transact(&payload, Duration::from_secs(1))?;
+        let (response, _) = self.session.transact(&payload, Duration::from_secs(1))?;
 
         if response[1] != STATUS_OK {
             return Err(format!(
@@ -314,15 +310,12 @@ impl Al80 {
         payload: &[u8; REPORT_BYTES],
         timeout: Duration,
     ) -> Result<(Vec<u8>, f64), String> {
-        let (response, elapsed_ms) =
-            self.session.transact(payload, timeout)?;
+        let (response, elapsed_ms) = self.session.transact(payload, timeout)?;
 
         Ok((response.to_vec(), elapsed_ms))
     }
 
-    pub fn pop_input_event(
-        &self,
-    ) -> Result<Option<raw_hid_session::HostInputEvent>, String> {
+    pub fn pop_input_event(&self) -> Result<Option<raw_hid_session::HostInputEvent>, String> {
         self.session.pop_input_event()
     }
 
@@ -330,12 +323,9 @@ impl Al80 {
         self.session.queued_input_events()
     }
 
-    pub fn raw_hid_session_stats(
-        &self,
-    ) -> raw_hid_session::RawHidSessionStats {
+    pub fn raw_hid_session_stats(&self) -> raw_hid_session::RawHidSessionStats {
         self.session.stats()
     }
-
 
     /// Return the keyboard LCD to its normal HOME screen.
     pub fn lcd_home(&mut self) -> Result<(), String> {
@@ -457,10 +447,26 @@ impl Al80 {
     }
 
     /// Stream one typed, volatile native RGB565 feedback frame.
+    /// Stream one complete typed, volatile native RGB565 feedback frame.
     pub fn lcd_generic_feedback(
         &mut self,
         feedback: &crate::lcd_feedback::LcdFeedback,
     ) -> Result<crate::lcd_feedback::LcdFeedbackTransfer, String> {
+        self.lcd_generic_feedback_until(feedback, || true)
+    }
+
+    /// Stream typed LCD feedback while `keep_going` remains true.
+    ///
+    /// The bridge finish sequence is preserved after a started transfer,
+    /// including cancellation after GUI_EVENT/ADD_PIC/data chunks.
+    pub fn lcd_generic_feedback_until<F>(
+        &mut self,
+        feedback: &crate::lcd_feedback::LcdFeedback,
+        mut keep_going: F,
+    ) -> Result<crate::lcd_feedback::LcdFeedbackTransfer, String>
+    where
+        F: FnMut() -> bool,
+    {
         const GUI_EVENT: [u8; 8] = [0xA5, 0x5A, 0x10, 0x00, 0x01, 0xC5, 0xB1, 0x01];
 
         const ADD_PIC: [u8; 7] = [0xA5, 0x5A, 0x0C, 0x78, 0x00, 0xC3, 0x93];
@@ -476,19 +482,35 @@ impl Al80 {
         let started = std::time::Instant::now();
         let mut begun = false;
         let mut chunks = 0usize;
+        let mut cancelled = false;
 
         let result = (|| -> Result<(), String> {
+            if !keep_going() {
+                cancelled = true;
+                return Ok(());
+            }
+
             self.lcd_bridge_packet(0x40, 0, &GUI_EVENT)?;
 
             begun = true;
 
             std::thread::sleep(Duration::from_millis(150));
 
+            if !keep_going() {
+                cancelled = true;
+                return Ok(());
+            }
+
             self.lcd_bridge_packet(0x41, 0, &ADD_PIC)?;
 
             chunks += 1;
 
             for (index, bytes) in frame.chunks(CHUNK).enumerate() {
+                if !keep_going() {
+                    cancelled = true;
+                    break;
+                }
+
                 let offset = index * CHUNK;
 
                 self.lcd_bridge_packet(0x41, offset as u16, bytes)?;
@@ -517,6 +539,7 @@ impl Al80 {
             bytes: frame.len(),
             chunks,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            cancelled,
         })
     }
 

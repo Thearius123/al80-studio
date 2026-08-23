@@ -1,3 +1,4 @@
+use al80_core::auto_lcd_feedback::{AutoLcdPolicy, auto_lcd_policy};
 use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::fs;
@@ -10,9 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use al80_core::input_event_bridge::{
-    InputEventKind as BridgeInputEventKind,
-    SequenceObservation,
-    TriggerKind as BridgeTriggerKind,
+    InputEventKind as BridgeInputEventKind, SequenceObservation, TriggerKind as BridgeTriggerKind,
 };
 use al80_core::raw_hid_session::HostInputEvent;
 use al80_core::{Al80, InputAction, InputBinding, InputEvent, InputTrigger};
@@ -32,14 +31,38 @@ static LCD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 const INPUT_EVENT_POLL: Duration = Duration::from_millis(5);
 const INPUT_EVENT_NONE: u64 = u64::MAX;
 
-static INPUT_EVENTS_CONSUMED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static INPUT_EVENTS_CONSUMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static INPUT_EVENT_LAST_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(INPUT_EVENT_NONE);
 static INPUT_EVENT_LAST_ACTION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(INPUT_EVENT_NONE);
 static INPUT_EVENT_LAST_FIRMWARE_DROPPED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/*
+ * AL80_AUTOMATIC_LCD_ACTION_FEEDBACK_V1
+ *
+ * Input event consumption must never block on the ~30 KiB LCD stream.
+ * One worker owns automatic generic feedback. While it is busy, newer
+ * generic auto-feedback is dropped rather than building stale backlog.
+ *
+ * Volume/Mute actions never enter this worker. They remain owned by the
+ * actual Fedora audio watcher so the display shows real host state.
+ */
+const AUTO_LCD_QUEUE_CAPACITY: usize = 1;
+
+static AUTO_LCD_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUTO_LCD_ENQUEUED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUTO_LCD_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUTO_LCD_CANCELLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUTO_LCD_DROPPED_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUTO_LCD_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy)]
+struct AutoLcdRequest {
+    action: u8,
+    feedback: LcdFeedback,
+}
 
 fn lcd_generation_bump() -> u64 {
     LCD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -206,12 +229,29 @@ fn lcd_home_if_generation(shared: &SharedDevice, generation: u64) -> Result<bool
     Ok(true)
 }
 
-fn lcd_volume(shared: &SharedDevice, state: VolumeState) -> Result<f64, String> {
-    lcd_generation_bump();
+fn lcd_volume_with_generation(
+    shared: &SharedDevice,
+    state: VolumeState,
+) -> Result<(f64, u64), String> {
+    /*
+     * Critical priority invariant:
+     * bump generation BEFORE waiting for the device mutex.
+     * A generic frame holding the mutex observes this new generation
+     * between LCD chunks and terminates its transfer early.
+     */
+    let generation = lcd_generation_bump();
 
     let mut owner = lock_device(shared)?;
 
-    owner.operation(|device| device.lcd_volume_osd(state.percent, state.muted))
+    let ack = owner.operation(|device| device.lcd_volume_osd(state.percent, state.muted))?;
+
+    Ok((ack, generation))
+}
+
+fn lcd_volume(shared: &SharedDevice, state: VolumeState) -> Result<f64, String> {
+    let (ack, _) = lcd_volume_with_generation(shared, state)?;
+
+    Ok(ack)
 }
 
 fn lcd_generic_feedback(
@@ -259,7 +299,7 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
 
         Ok(format!(
             concat!(
-                "OK api=1 daemon=0.5.0 ",
+                "OK api=1 daemon=0.6.0 ",
                 "firmware=EXTENDED ",
                 "matrix_scan=YES ",
                 "rgb_runtime=YES ",
@@ -276,8 +316,8 @@ fn capabilities_line(shared: &SharedDevice) -> Result<String, String> {
                 "creator_scene_state={} ",
                 "input_router=YES ",
                 "input_event_bridge_host=YES ",
-                "input_event_firmware=NO ",
-                "input_event_auto_lcd=NO ",
+                "input_event_firmware=YES ",
+                "input_event_auto_lcd=YES ",
                 "lcd_feedback=YES ",
                 "lcd_feedback_kinds=8 ",
                 "input_bindings={} ",
@@ -695,7 +735,6 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
     }
 }
 
-
 fn bridge_event_name(event: BridgeInputEventKind) -> &'static str {
     match event {
         BridgeInputEventKind::KnobCcw => "KNOB_CCW",
@@ -744,9 +783,7 @@ fn bridge_action_name(action: u8) -> &'static str {
     }
 }
 
-fn sequence_observation_name(
-    observation: SequenceObservation,
-) -> &'static str {
+fn sequence_observation_name(observation: SequenceObservation) -> &'static str {
     match observation {
         SequenceObservation::First(_) => "FIRST",
         SequenceObservation::Consecutive { .. } => "OK",
@@ -780,20 +817,11 @@ fn input_event_log_line(host_event: HostInputEvent) -> String {
 fn record_input_event(host_event: HostInputEvent) {
     let event = host_event.event;
 
-    INPUT_EVENTS_CONSUMED.fetch_add(
-        1,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    INPUT_EVENTS_CONSUMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    INPUT_EVENT_LAST_SEQUENCE.store(
-        event.sequence as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    INPUT_EVENT_LAST_SEQUENCE.store(event.sequence as u64, std::sync::atomic::Ordering::Relaxed);
 
-    INPUT_EVENT_LAST_ACTION.store(
-        event.action as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    INPUT_EVENT_LAST_ACTION.store(event.action as u64, std::sync::atomic::Ordering::Relaxed);
 
     INPUT_EVENT_LAST_FIRMWARE_DROPPED.store(
         event.dropped_counter as u64,
@@ -801,6 +829,176 @@ fn record_input_event(host_event: HostInputEvent) {
     );
 
     println!("{}", input_event_log_line(host_event));
+}
+
+fn auto_lcd_enqueue(sender: &mpsc::SyncSender<AutoLcdRequest>, action: u8) {
+    match auto_lcd_policy(action) {
+        Ok(AutoLcdPolicy::None) => {
+            println!("AL80D_AUTO_LCD_POLICY=NONE ACTION={action}");
+        }
+
+        Ok(AutoLcdPolicy::AudioWatcher) => {
+            /*
+             * Preempt a generic automatic frame immediately, before the
+             * actual host audio watcher reaches the device mutex.
+             * The watcher remains authoritative for the displayed value.
+             */
+            let generation = lcd_generation_bump();
+
+            println!(
+                concat!(
+                    "AL80D_AUTO_LCD_POLICY=AUDIO_WATCHER ACTION={} ",
+                    "PREEMPT_GENERATION={}"
+                ),
+                action, generation,
+            );
+        }
+
+        Ok(AutoLcdPolicy::Feedback(feedback)) => {
+            if AUTO_LCD_BUSY
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+            {
+                AUTO_LCD_DROPPED_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                println!("AL80D_AUTO_LCD_DROP=BUSY ACTION={action}");
+
+                return;
+            }
+
+            match sender.try_send(AutoLcdRequest { action, feedback }) {
+                Ok(()) => {
+                    AUTO_LCD_ENQUEUED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    println!(
+                        "AL80D_AUTO_LCD_QUEUED=YES ACTION={action} KIND={} VALUE={}",
+                        feedback.kind_token(),
+                        feedback.value_token(),
+                    );
+                }
+
+                Err(error) => {
+                    AUTO_LCD_BUSY.store(false, std::sync::atomic::Ordering::Release);
+
+                    AUTO_LCD_DROPPED_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    eprintln!("AL80D_AUTO_LCD_QUEUE_ERROR={error} ACTION={action}");
+                }
+            }
+        }
+
+        Err(error) => {
+            AUTO_LCD_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            eprintln!("AL80D_AUTO_LCD_POLICY_ERROR={error}");
+        }
+    }
+}
+
+fn lcd_auto_feedback(
+    shared: &SharedDevice,
+    feedback: &LcdFeedback,
+    generation: u64,
+) -> Result<al80_core::lcd_feedback::LcdFeedbackTransfer, String> {
+    let mut owner = lock_device(shared)?;
+
+    owner.operation(|device| {
+        device.lcd_generic_feedback_until(feedback, || {
+            LCD_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
+        })
+    })
+}
+
+fn schedule_auto_lcd_home(shared: &SharedDevice, generation: u64) {
+    let delayed_shared = Arc::clone(shared);
+
+    thread::spawn(move || {
+        thread::sleep(GENERIC_LCD_IDLE);
+
+        match lcd_home_if_generation(&delayed_shared, generation) {
+            Ok(true) => {
+                println!("AL80D_AUTO_LCD_HOME=PASS");
+            }
+
+            Ok(false) => {
+                println!("AL80D_AUTO_LCD_HOME=SKIPPED_NEWER_ACTIVITY");
+            }
+
+            Err(error) => {
+                eprintln!("AL80D_AUTO_LCD_HOME_ERROR={error}");
+            }
+        }
+    });
+}
+
+fn start_auto_lcd_worker(
+    shared: SharedDevice,
+    receiver: mpsc::Receiver<AutoLcdRequest>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        println!("AL80D_AUTO_LCD_WORKER=READY QUEUE_CAPACITY={AUTO_LCD_QUEUE_CAPACITY}");
+
+        while let Ok(request) = receiver.recv() {
+            let generation = lcd_generation_bump();
+
+            let kind = request.feedback.kind_token().to_string();
+
+            let value = request.feedback.value_token();
+
+            match lcd_auto_feedback(&shared, &request.feedback, generation) {
+                Ok(transfer) if transfer.cancelled => {
+                    AUTO_LCD_CANCELLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    println!(
+                        concat!(
+                            "AL80D_AUTO_LCD_CANCELLED=NEWER_ACTIVITY ",
+                            "ACTION={} KIND={} VALUE={} CHUNKS={} MS={:.3}"
+                        ),
+                        request.action, kind, value, transfer.chunks, transfer.elapsed_ms,
+                    );
+                }
+
+                Ok(transfer) => {
+                    AUTO_LCD_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    println!(
+                        concat!(
+                            "AL80D_AUTO_LCD_SEND=PASS ACTION={} ",
+                            "KIND={} VALUE={} BYTES={} CHUNKS={} MS={:.3}"
+                        ),
+                        request.action,
+                        kind,
+                        value,
+                        transfer.bytes,
+                        transfer.chunks,
+                        transfer.elapsed_ms,
+                    );
+
+                    schedule_auto_lcd_home(&shared, generation);
+                }
+
+                Err(error) => {
+                    AUTO_LCD_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    eprintln!(
+                        "AL80D_AUTO_LCD_SEND_ERROR={error} ACTION={}",
+                        request.action,
+                    );
+                }
+            }
+
+            AUTO_LCD_BUSY.store(false, std::sync::atomic::Ordering::Release);
+        }
+
+        AUTO_LCD_BUSY.store(false, std::sync::atomic::Ordering::Release);
+
+        eprintln!("AL80D_AUTO_LCD_WORKER=DISCONNECTED");
+    })
 }
 
 fn input_events_status_line(shared: &SharedDevice) -> Result<String, String> {
@@ -817,33 +1015,28 @@ fn input_events_status_line(shared: &SharedDevice) -> Result<String, String> {
         })?
     };
 
-    let consumed = INPUT_EVENTS_CONSUMED.load(
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let consumed = INPUT_EVENTS_CONSUMED.load(std::sync::atomic::Ordering::Relaxed);
 
-    let last_sequence = INPUT_EVENT_LAST_SEQUENCE.load(
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let last_sequence = INPUT_EVENT_LAST_SEQUENCE.load(std::sync::atomic::Ordering::Relaxed);
 
-    let last_action = INPUT_EVENT_LAST_ACTION.load(
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let last_action = INPUT_EVENT_LAST_ACTION.load(std::sync::atomic::Ordering::Relaxed);
 
     let firmware_dropped =
-        INPUT_EVENT_LAST_FIRMWARE_DROPPED.load(
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        INPUT_EVENT_LAST_FIRMWARE_DROPPED.load(std::sync::atomic::Ordering::Relaxed);
 
     Ok(format!(
         concat!(
             "OK input_event_bridge_host=YES ",
-            "firmware_event_emitter=NO ",
-            "auto_lcd=NO queue_capacity=8 ",
+            "firmware_event_emitter=YES ",
+            "auto_lcd=YES queue_capacity=8 ",
             "received={} consumed={} queued={} ",
             "malformed={} host_queue_drops={} ",
             "sequence_gaps={} sequence_duplicates={} ",
             "last_sequence={} last_action={} ",
-            "firmware_dropped={}"
+            "firmware_dropped={} ",
+            "auto_lcd_enqueued={} auto_lcd_sent={} ",
+            "auto_lcd_cancelled={} auto_lcd_dropped_busy={} ",
+            "auto_lcd_errors={}"
         ),
         stats.events_received,
         consumed,
@@ -862,25 +1055,29 @@ fn input_events_status_line(shared: &SharedDevice) -> Result<String, String> {
         } else {
             last_action.to_string()
         },
-        firmware_dropped
+        firmware_dropped,
+        AUTO_LCD_ENQUEUED.load(std::sync::atomic::Ordering::Relaxed,),
+        AUTO_LCD_SENT.load(std::sync::atomic::Ordering::Relaxed,),
+        AUTO_LCD_CANCELLED.load(std::sync::atomic::Ordering::Relaxed,),
+        AUTO_LCD_DROPPED_BUSY.load(std::sync::atomic::Ordering::Relaxed,),
+        AUTO_LCD_ERRORS.load(std::sync::atomic::Ordering::Relaxed,),
     ))
 }
 
 fn start_input_event_pump(
     shared: SharedDevice,
+    auto_lcd_sender: mpsc::SyncSender<AutoLcdRequest>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         println!("AL80D_INPUT_EVENT_PUMP=READY");
-        println!("AL80D_INPUT_EVENT_LCD_POLICY=OBSERVE_ONLY");
+        println!("AL80D_INPUT_EVENT_LCD_POLICY=AUTOMATIC_V1");
 
         loop {
             let result = {
                 let mut owner = match shared.lock() {
                     Ok(owner) => owner,
                     Err(_) => {
-                        eprintln!(
-                            "AL80D_INPUT_EVENT_PUMP_ERROR=device_mutex_poisoned"
-                        );
+                        eprintln!("AL80D_INPUT_EVENT_PUMP_ERROR=device_mutex_poisoned");
                         thread::sleep(RECONNECT);
                         continue;
                     }
@@ -891,7 +1088,16 @@ fn start_input_event_pump(
 
             match result {
                 Ok(Some(event)) => {
+                    let action = event.event.action;
+
                     record_input_event(event);
+
+                    /*
+                     * Nonblocking best-effort dispatch.
+                     * The authoritative routed action already happened
+                     * in firmware before this host event existed.
+                     */
+                    auto_lcd_enqueue(&auto_lcd_sender, action);
                 }
 
                 Ok(None) => {
@@ -899,9 +1105,7 @@ fn start_input_event_pump(
                 }
 
                 Err(error) => {
-                    eprintln!(
-                        "AL80D_INPUT_EVENT_PUMP_ERROR={error}"
-                    );
+                    eprintln!("AL80D_INPUT_EVENT_PUMP_ERROR={error}");
                     thread::sleep(RECONNECT);
                 }
             }
@@ -1013,6 +1217,7 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
     let mut pending: Option<VolumeState> = None;
     let mut pending_since: Option<Instant> = None;
     let mut last_sent: Option<VolumeState> = None;
+    let mut last_lcd_generation: Option<u64> = None;
     let mut last_change_at: Option<Instant> = None;
     let mut home_sent = true;
 
@@ -1059,7 +1264,11 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
                             pending_since = None;
 
                             if Some(current) != last_sent {
-                                let ack = lcd_volume(shared, current)?;
+                                let (ack, generation) =
+                                    lcd_volume_with_generation(shared, current)?;
+
+                                last_lcd_generation = Some(generation);
+
                                 println!(
                                     "AL80D_LCD_SEND={} ACK_MS={:.3}",
                                     if current.muted {
@@ -1097,7 +1306,10 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
                 pending_since = None;
 
                 if Some(state) != last_sent {
-                    let ack = lcd_volume(shared, state)?;
+                    let (ack, generation) = lcd_volume_with_generation(shared, state)?;
+
+                    last_lcd_generation = Some(generation);
+
                     println!(
                         "AL80D_LCD_SEND={} ACK_MS={:.3}",
                         if state.muted {
@@ -1115,10 +1327,29 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
         if !home_sent && pending.is_none() {
             if let Some(changed) = last_change_at {
                 if now.duration_since(changed) >= HOME_IDLE {
-                    lcd_home(shared)?;
-                    println!("AL80D_IDLE_HOME=PASS");
+                    let home_applied = match last_lcd_generation {
+                        Some(generation) => lcd_home_if_generation(shared, generation)?,
+
+                        None => {
+                            /*
+                             * Fail closed: an idle HOME without a
+                             * generation must never overwrite newer
+                             * LCD activity. Startup HOME remains the
+                             * only unconditional audio-session HOME.
+                             */
+                            false
+                        }
+                    };
+
+                    if home_applied {
+                        println!("AL80D_IDLE_HOME=PASS");
+                    } else {
+                        println!("AL80D_IDLE_HOME=SKIPPED_NEWER_ACTIVITY");
+                    }
+
                     home_sent = true;
                     last_sent = None;
+                    last_lcd_generation = None;
                 }
             }
         }
@@ -1135,19 +1366,22 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
 
 fn main() {
     println!("AL80D=START");
-    println!("AL80D_VERSION=0.5.0");
+    println!("AL80D_VERSION=0.6.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
     println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
     println!("AL80D_HOST_SETTLE_MS=50");
     println!("AL80D_HOME_IDLE_MS=3000");
     println!("AL80D_INPUT_EVENT_BRIDGE_HOST=YES");
-    println!("AL80D_INPUT_EVENT_FIRMWARE=NO");
-    println!("AL80D_INPUT_EVENT_AUTO_LCD=NO");
+    println!("AL80D_INPUT_EVENT_FIRMWARE=YES");
+    println!("AL80D_INPUT_EVENT_AUTO_LCD=YES");
 
     let shared = Arc::new(Mutex::new(DeviceOwner::new()));
 
-    let _input_event_pump =
-        start_input_event_pump(Arc::clone(&shared));
+    let (auto_lcd_sender, auto_lcd_receiver) = mpsc::sync_channel(AUTO_LCD_QUEUE_CAPACITY);
+
+    let _auto_lcd_worker = start_auto_lcd_worker(Arc::clone(&shared), auto_lcd_receiver);
+
+    let _input_event_pump = start_input_event_pump(Arc::clone(&shared), auto_lcd_sender);
 
     match start_ipc_server(Arc::clone(&shared)) {
         Ok(_ipc) => {}
@@ -1173,14 +1407,10 @@ fn main() {
     }
 }
 
-
 #[cfg(test)]
 mod input_event_pump_tests {
     use super::*;
-    use al80_core::input_event_bridge::{
-        InputRouterEvent,
-        TriggerKind as BridgeTriggerKind,
-    };
+    use al80_core::input_event_bridge::{InputRouterEvent, TriggerKind as BridgeTriggerKind};
 
     fn host_event(
         sequence: u16,
@@ -1213,14 +1443,8 @@ mod input_event_pump_tests {
 
     #[test]
     fn event_names_are_typed() {
-        assert_eq!(
-            bridge_event_name(BridgeInputEventKind::KnobCcw),
-            "KNOB_CCW"
-        );
-        assert_eq!(
-            bridge_event_name(BridgeInputEventKind::KnobCw),
-            "KNOB_CW"
-        );
+        assert_eq!(bridge_event_name(BridgeInputEventKind::KnobCcw), "KNOB_CCW");
+        assert_eq!(bridge_event_name(BridgeInputEventKind::KnobCw), "KNOB_CW");
         assert_eq!(
             bridge_event_name(BridgeInputEventKind::KnobPress),
             "KNOB_PRESS"

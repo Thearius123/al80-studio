@@ -36,6 +36,7 @@ pub struct LcdFeedbackTransfer {
     pub bytes: usize,
     pub chunks: usize,
     pub elapsed_ms: f64,
+    pub cancelled: bool,
 }
 
 impl LcdFeedbackKind {

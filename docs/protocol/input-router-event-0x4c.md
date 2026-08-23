@@ -160,3 +160,37 @@ queue is empty, `pop_input_event()` surfaces the error through
 `DeviceOwner::operation`, allowing the existing reconnect-and-retry policy to
 replace the stale device session.
 
+
+## Automatic LCD Action Feedback V1
+
+After physical validation of the 0x4C/E1 firmware emitter, the host may map
+allowlisted routed actions to transient LCD feedback.
+
+V1 rules:
+
+- action 0: no LCD feedback;
+- actions 1–3: defer to actual host audio watcher state;
+- actions 4–20: typed `ACTION <id>` feedback;
+- action 21: `SNAKE OFF`;
+- action 22: `SNAKE ON`;
+- action 23: typed `ACTION 23` because the resulting toggle state is not
+  encoded in the event;
+- action 24: `SCENE OFF`.
+
+Automatic generic LCD rendering runs outside the input-event pump. Its
+single-slot worker is best effort and does not build a stale UI backlog.
+
+The 96×160 stream is generation-cancellable before GUI_EVENT, after the
+recovered 150 ms settle, and between RGB565 chunks. Once a bridge session
+has begun, cancellation still preserves the recovered bridge-finish
+sequence.
+
+Routed Volume/Mute events bump generation immediately but never invent an
+audio value. The existing audio watcher remains authoritative for the
+actual percentage/mute OSD and bumps generation before waiting for the
+device mutex.
+
+The audio watcher's delayed HOME is generation guarded so an older audio
+timer cannot overwrite newer generic feedback.
+
+No firmware event carries arbitrary LCD strings.
