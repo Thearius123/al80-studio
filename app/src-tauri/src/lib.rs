@@ -324,6 +324,171 @@ fn parse_capabilities(response: &str) -> Result<Capabilities, String> {
     })
 }
 
+const HOST_LIBRARY_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+fn host_library_file_name(library: &str) -> Result<&'static str, String> {
+    match library {
+        "creator-scenes-v1" => Ok("creator-scenes-v1.json"),
+        "input-profiles-v1" => Ok("input-profiles-v1.json"),
+        "host-profiles-v1" => Ok("host-profiles-v1.json"),
+        _ => Err(format!("Host library is not allowlisted: {library}")),
+    }
+}
+
+fn host_library_root() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .ok_or_else(|| "LOCALAPPDATA is unavailable".to_string())?;
+        return Ok(std::path::PathBuf::from(base)
+            .join("AL80 Studio")
+            .join("host-library-v1"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| "HOME is unavailable".to_string())?;
+        return Ok(std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("AL80 Studio")
+            .join("host-library-v1"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = match std::env::var_os("XDG_DATA_HOME") {
+            Some(value) => std::path::PathBuf::from(value),
+            None => {
+                let home = std::env::var_os("HOME")
+                    .ok_or_else(|| "HOME is unavailable".to_string())?;
+                std::path::PathBuf::from(home).join(".local").join("share")
+            }
+        };
+
+        return Ok(base.join("al80-studio").join("host-library-v1"));
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform for Host Library Persistence V1".to_string())
+}
+
+fn host_library_path(library: &str) -> Result<std::path::PathBuf, String> {
+    let file_name = host_library_file_name(library)?;
+    Ok(host_library_root()?.join(file_name))
+}
+
+fn validate_host_library_json(json: &str) -> Result<(), String> {
+    if json.len() > HOST_LIBRARY_MAX_BYTES {
+        return Err(format!(
+            "Host library payload exceeds {} bytes",
+            HOST_LIBRARY_MAX_BYTES
+        ));
+    }
+
+    let trimmed = json.trim();
+
+    if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
+        return Err("Host library payload must be a JSON array".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn read_host_library(library: String) -> Result<Option<String>, String> {
+    let path = host_library_path(&library)?;
+
+    match std::fs::read_to_string(&path) {
+        Ok(value) => {
+            validate_host_library_json(&value)?;
+            Ok(Some(value))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Failed to read host library {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+#[tauri::command]
+fn write_host_library(library: String, json: String) -> Result<String, String> {
+    validate_host_library_json(&json)?;
+
+    let path = host_library_path(&library)?;
+    let root = path
+        .parent()
+        .ok_or_else(|| "Host library path has no parent".to_string())?;
+
+    std::fs::create_dir_all(root).map_err(|error| {
+        format!(
+            "Failed to create host library directory {}: {error}",
+            root.display()
+        )
+    })?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Host library file name is invalid".to_string())?;
+
+    let temp = root.join(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    std::fs::write(&temp, json.as_bytes()).map_err(|error| {
+        format!(
+            "Failed to write temporary host library {}: {error}",
+            temp.display()
+        )
+    })?;
+
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| {
+            format!(
+                "Failed to replace host library {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    std::fs::rename(&temp, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!(
+            "Failed to publish host library {}: {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(format!(
+        "OK host_library=V1 library={} bytes={}",
+        library,
+        json.len()
+    ))
+}
+
+#[tauri::command]
+fn host_library_status() -> Result<String, String> {
+    let root = host_library_root()?;
+
+    let exists = |library: &str| -> Result<&'static str, String> {
+        Ok(if host_library_path(library)?.is_file() {
+            "YES"
+        } else {
+            "NO"
+        })
+    };
+
+    Ok(format!(
+        "OK host_library=V1 creator={} input={} profiles={} root={}",
+        exists("creator-scenes-v1")?,
+        exists("input-profiles-v1")?,
+        exists("host-profiles-v1")?,
+        root.display()
+    ))
+}
+
 #[tauri::command]
 fn get_device_status() -> DeviceStatus {
     match ipc_request("STATUS").and_then(|response| parse_status(&response)) {
@@ -561,6 +726,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_device_status,
             get_capabilities,
+            read_host_library,
+            write_host_library,
+            host_library_status,
             set_rgb_core_runtime,
             set_overlay_runtime,
             run_safe_extension_command,

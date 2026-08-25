@@ -87,6 +87,7 @@ export interface InputDesignerEventContext {
 
 const DRAFT_KEY = "al80-studio.input-draft.v1";
 const PROFILE_KEY = "al80-studio.input-profiles.v1";
+const HOST_LIBRARY_INPUT_PROFILES = "input-profiles-v1";
 
 const EVENTS = [
   { id: 1, label: "Knob Left / CCW" },
@@ -227,7 +228,48 @@ function loadProfiles(): SavedInputProfile[] {
 }
 
 function saveProfiles(): void {
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles));
+  const json = JSON.stringify(profiles);
+  localStorage.setItem(PROFILE_KEY, json);
+
+  void invoke<string>("write_host_library", {
+    library: HOST_LIBRARY_INPUT_PROFILES,
+    json,
+  }).catch((error) => {
+    console.error("Input profile host persistence failed", error);
+  });
+}
+
+export async function hydrateInputProfilesFromHost(): Promise<void> {
+  const hostJson = await invoke<string | null>("read_host_library", {
+    library: HOST_LIBRARY_INPUT_PROFILES,
+  });
+
+  if (hostJson !== null) {
+    localStorage.setItem(PROFILE_KEY, hostJson);
+    profiles = loadProfiles();
+
+    const normalized = JSON.stringify(profiles);
+
+    if (normalized !== hostJson) {
+      localStorage.setItem(PROFILE_KEY, normalized);
+      await invoke<string>("write_host_library", {
+        library: HOST_LIBRARY_INPUT_PROFILES,
+        json: normalized,
+      });
+    }
+
+    return;
+  }
+
+  profiles = loadProfiles();
+
+  const migrated = JSON.stringify(profiles);
+  localStorage.setItem(PROFILE_KEY, migrated);
+
+  await invoke<string>("write_host_library", {
+    library: HOST_LIBRARY_INPUT_PROFILES,
+    json: migrated,
+  });
 }
 
 function persistAndRender(context: InputDesignerEventContext): void {

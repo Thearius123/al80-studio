@@ -4,6 +4,7 @@ import {
   bindInputDesignerEvents,
   getCurrentInputDraftForHost,
   getSavedInputProfilesForHost,
+  hydrateInputProfilesFromHost,
   refreshInputDesigner,
   renderInputDesigner,
   replaceInputDraftFromHost,
@@ -193,6 +194,8 @@ interface HostProfile {
 
 const PROFILE_KEY = "al80-studio.host-profiles.v1";
 const CREATOR_SCENE_KEY = "al80-studio.creator-scenes.v1";
+const HOST_LIBRARY_HOST_PROFILES = "host-profiles-v1";
+const HOST_LIBRARY_CREATOR_SCENES = "creator-scenes-v1";
 
 function requireAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
@@ -269,7 +272,15 @@ function loadCreatorScenes(): SavedCreatorScene[] {
 }
 
 function saveCreatorScenes(): void {
-  localStorage.setItem(CREATOR_SCENE_KEY, JSON.stringify(savedCreatorScenes));
+  const json = JSON.stringify(savedCreatorScenes);
+  localStorage.setItem(CREATOR_SCENE_KEY, json);
+
+  void invoke<string>("write_host_library", {
+    library: HOST_LIBRARY_CREATOR_SCENES,
+    json,
+  }).catch((error) => {
+    console.error("Creator scene host persistence failed", error);
+  });
 }
 
 function creatorSnapshot(): void {
@@ -456,7 +467,76 @@ function loadProfiles(): HostProfile[] {
 }
 
 function saveProfiles(): void {
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles));
+  const json = JSON.stringify(profiles);
+  localStorage.setItem(PROFILE_KEY, json);
+
+  void invoke<string>("write_host_library", {
+    library: HOST_LIBRARY_HOST_PROFILES,
+    json,
+  }).catch((error) => {
+    console.error("Host profile persistence failed", error);
+  });
+}
+
+async function hydrateMainHostLibraries(): Promise<void> {
+  const [creatorHostJson, profileHostJson] = await Promise.all([
+    invoke<string | null>("read_host_library", {
+      library: HOST_LIBRARY_CREATOR_SCENES,
+    }),
+    invoke<string | null>("read_host_library", {
+      library: HOST_LIBRARY_HOST_PROFILES,
+    }),
+  ]);
+
+  if (creatorHostJson !== null) {
+    localStorage.setItem(CREATOR_SCENE_KEY, creatorHostJson);
+    savedCreatorScenes = loadCreatorScenes();
+
+    const normalized = JSON.stringify(savedCreatorScenes);
+
+    if (normalized !== creatorHostJson) {
+      localStorage.setItem(CREATOR_SCENE_KEY, normalized);
+      await invoke<string>("write_host_library", {
+        library: HOST_LIBRARY_CREATOR_SCENES,
+        json: normalized,
+      });
+    }
+  } else {
+    savedCreatorScenes = loadCreatorScenes();
+
+    const migrated = JSON.stringify(savedCreatorScenes);
+    localStorage.setItem(CREATOR_SCENE_KEY, migrated);
+
+    await invoke<string>("write_host_library", {
+      library: HOST_LIBRARY_CREATOR_SCENES,
+      json: migrated,
+    });
+  }
+
+  if (profileHostJson !== null) {
+    localStorage.setItem(PROFILE_KEY, profileHostJson);
+    profiles = loadProfiles();
+
+    const normalized = JSON.stringify(profiles);
+
+    if (normalized !== profileHostJson) {
+      localStorage.setItem(PROFILE_KEY, normalized);
+      await invoke<string>("write_host_library", {
+        library: HOST_LIBRARY_HOST_PROFILES,
+        json: normalized,
+      });
+    }
+  } else {
+    profiles = loadProfiles();
+
+    const migrated = JSON.stringify(profiles);
+    localStorage.setItem(PROFILE_KEY, migrated);
+
+    await invoke<string>("write_host_library", {
+      library: HOST_LIBRARY_HOST_PROFILES,
+      json: migrated,
+    });
+  }
 }
 
 async function loadRegistry(): Promise<ExtensionRegistry> {
@@ -1404,6 +1484,11 @@ async function refresh(message = ""): Promise<void> {
     registry = nextRegistry;
     creatorLayout = nextCreatorLayout;
     await refreshInputDesigner(nextCaps);
+    await Promise.all([
+      hydrateMainHostLibraries(),
+      hydrateInputProfilesFromHost(),
+    ]);
+
     profiles = loadProfiles();
     savedCreatorScenes = loadCreatorScenes();
 
