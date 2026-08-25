@@ -1,3 +1,8 @@
+import {
+  CREATOR_EFFECTS,
+  type CreatorEffectId,
+  renderCreatorEffectFrame,
+} from "./creator-effects";
 import { invoke } from "@tauri-apps/api/core";
 import "./style.css";
 import {
@@ -220,6 +225,12 @@ let creatorTool: CreatorTool = "paint";
 let creatorSelected = new Set<number>();
 let creatorHistory: string[][] = [];
 let creatorInputSource = "draft";
+let creatorEffectId: CreatorEffectId = "snake";
+let creatorEffectPrimary = "#7c83ff";
+let creatorEffectSecondary = "#000000";
+let creatorEffectSpeed = 3;
+let creatorEffectTail = 8;
+let creatorEffectPhase = 0;
 let savedCreatorScenes: SavedCreatorScene[] = loadCreatorScenes();
 let profiles: HostProfile[] = loadProfiles();
 let busy = false;
@@ -872,6 +883,13 @@ function renderCreator(): string {
   const autoLcdReady =
     capabilities?.inputEventAutoLcd === true;
 
+  const creatorEffectOptions = CREATOR_EFFECTS.map(
+    (effect) =>
+      `<option value="${effect.id}" ${
+        creatorEffectId === effect.id ? "selected" : ""
+      }>${esc(effect.name)}</option>`,
+  ).join("");
+
   if (!creatorLayout) {
     return `<section class="page"><div class="page-heading"><div><p class="eyebrow">Creator Mode</p><h1>Keyboard Painter</h1><p>Loading AL80 physical LED map…</p></div></div></section>`;
   }
@@ -897,6 +915,96 @@ function renderCreator(): string {
     : `<div class="creator-empty-scenes">No saved scenes yet.</div>`;
 
   return `<section class="page">
+      <article class="panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">Creator Effect Engine V1</p>
+            <h2>Effect Lab · preview only</h2>
+          </div>
+          ${badge("Host renderer")}
+        </div>
+
+        <div class="control-grid">
+          <label>
+            <span>Effect</span>
+            <select id="creator-effect-kind">
+              ${creatorEffectOptions}
+            </select>
+          </label>
+
+          <label>
+            <span>Primary</span>
+            <input
+              id="creator-effect-primary"
+              type="color"
+              value="${esc(creatorEffectPrimary)}"
+            />
+          </label>
+
+          <label>
+            <span>Secondary</span>
+            <input
+              id="creator-effect-secondary"
+              type="color"
+              value="${esc(creatorEffectSecondary)}"
+            />
+          </label>
+
+          <label>
+            <span>Speed 1–10</span>
+            <input
+              id="creator-effect-speed"
+              type="range"
+              min="1"
+              max="10"
+              step="1"
+              value="${creatorEffectSpeed}"
+            />
+          </label>
+
+          <label>
+            <span>Tail 1–32</span>
+            <input
+              id="creator-effect-tail"
+              type="range"
+              min="1"
+              max="32"
+              step="1"
+              value="${creatorEffectTail}"
+            />
+          </label>
+
+          <label>
+            <span>Phase</span>
+            <input
+              id="creator-effect-phase"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="${Math.round(creatorEffectPhase * 100)}"
+            />
+          </label>
+        </div>
+
+        <div class="button-row">
+          <button
+            id="creator-effect-preview"
+            class="primary-btn"
+            type="button"
+          >
+            Render preview frame
+          </button>
+        </div>
+
+        <p class="muted">
+          Preview modifies only the local 82-LED painter buffer. It does not
+          stream frames to the keyboard and does not call any new device API.
+          You can inspect or edit the generated frame, then use the existing
+          validated Creator Scene Apply manually if desired.
+        </p>
+      </article>
+
       <article class="panel">
         <div class="panel-title-row">
           <div>
@@ -1562,6 +1670,84 @@ function bindEvents(): void {
       render();
     },
   });
+
+  document
+    .querySelector<HTMLSelectElement>("#creator-effect-kind")
+    ?.addEventListener("change", (event) => {
+      creatorEffectId =
+        (event.currentTarget as HTMLSelectElement).value as CreatorEffectId;
+    });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-effect-primary")
+    ?.addEventListener("input", (event) => {
+      creatorEffectPrimary =
+        (event.currentTarget as HTMLInputElement).value;
+    });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-effect-secondary")
+    ?.addEventListener("input", (event) => {
+      creatorEffectSecondary =
+        (event.currentTarget as HTMLInputElement).value;
+    });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-effect-speed")
+    ?.addEventListener("input", (event) => {
+      creatorEffectSpeed = Number.parseInt(
+        (event.currentTarget as HTMLInputElement).value,
+        10,
+      );
+    });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-effect-tail")
+    ?.addEventListener("input", (event) => {
+      creatorEffectTail = Number.parseInt(
+        (event.currentTarget as HTMLInputElement).value,
+        10,
+      );
+    });
+
+  document
+    .querySelector<HTMLInputElement>("#creator-effect-phase")
+    ?.addEventListener("input", (event) => {
+      creatorEffectPhase =
+        Number.parseInt(
+          (event.currentTarget as HTMLInputElement).value,
+          10,
+        ) / 100;
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-effect-preview")
+    ?.addEventListener("click", () => {
+      if (!creatorLayout) return;
+
+      creatorSnapshot();
+
+      const order = [
+        ...creatorLayout.keys.map((key) => key.ledIndex),
+        ...creatorLayout.accents.map((accent) => accent.ledIndex),
+      ];
+
+      creatorColors = renderCreatorEffectFrame(
+        {
+          effect: creatorEffectId,
+          primary: creatorEffectPrimary,
+          secondary: creatorEffectSecondary,
+          speed: creatorEffectSpeed,
+          tailLength: creatorEffectTail,
+          phase: creatorEffectPhase,
+        },
+        order,
+        82,
+      );
+
+      notice = `Rendered ${creatorEffectId} preview locally.`;
+      render();
+    });
 
   document
     .querySelector<HTMLSelectElement>("#creator-input-source")
