@@ -3,6 +3,7 @@ use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -277,6 +278,7 @@ fn lock_device(shared: &SharedDevice) -> Result<MutexGuard<'_, DeviceOwner>, Str
         .map_err(|_| "AL80D device mutex poisoned".to_string())
 }
 
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     if let Ok(runtime) = env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime).join("al80d.sock");
@@ -1278,6 +1280,7 @@ fn start_input_event_pump(
     })
 }
 
+#[cfg(unix)]
 fn handle_client(mut stream: UnixStream, shared: SharedDevice) {
     let cloned = match stream.try_clone() {
         Ok(stream) => stream,
@@ -1309,6 +1312,7 @@ fn handle_client(mut stream: UnixStream, shared: SharedDevice) {
     let _ = writeln!(stream, "{response}");
 }
 
+#[cfg(unix)]
 fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, String> {
     let path = socket_path();
 
@@ -1337,6 +1341,13 @@ fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, Stri
             }
         }
     }))
+}
+
+#[cfg(windows)]
+fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, String> {
+    Err(
+        "AL80 Windows Named Pipe server is pending Windows Foundation IPC stage".to_string(),
+    )
 }
 
 fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHandle<()>), String> {

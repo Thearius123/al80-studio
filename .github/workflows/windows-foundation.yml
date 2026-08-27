@@ -1,0 +1,47 @@
+name: Windows Foundation
+
+on:
+  push:
+    branches:
+      - windows-foundation-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows-compile:
+    name: Native Windows compile
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Frontend build
+        working-directory: app
+        run: npm run build
+
+      - name: Core native Windows check
+        run: cargo check --manifest-path core/Cargo.toml --lib --bins
+
+      - name: Core native Windows test compile
+        run: cargo test --manifest-path core/Cargo.toml --no-run
+
+      - name: Tauri native Windows check
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml

@@ -5,6 +5,7 @@ pub mod auto_lcd_feedback;
 pub mod lcd_feedback;
 
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -213,6 +214,23 @@ pub struct Al80 {
 }
 
 impl DeviceInfo {
+    #[cfg(windows)]
+    pub fn discover() -> Result<Self, String> {
+        Err(
+            "AL80 Windows HID backend is pending Windows Foundation HID stage"
+                .to_string(),
+        )
+    }
+
+    #[cfg(windows)]
+    fn open(&self) -> Result<File, String> {
+        Err(
+            "AL80 Windows HID transport is pending Windows Foundation HID stage"
+                .to_string(),
+        )
+    }
+
+    #[cfg(unix)]
     pub fn discover() -> Result<Self, String> {
         let sys = Path::new("/sys/class/hidraw");
 
@@ -274,6 +292,7 @@ impl DeviceInfo {
         })
     }
 
+    #[cfg(unix)]
     fn open(&self) -> Result<File, String> {
         OpenOptions::new()
             .read(true)

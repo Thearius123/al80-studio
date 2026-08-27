@@ -1,6 +1,7 @@
 use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -134,6 +135,7 @@ struct LcdLogicalStatus {
     value: Option<String>,
 }
 
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     if let Ok(runtime) = env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime).join("al80d.sock");
@@ -143,6 +145,7 @@ fn socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/al80d-{user}.sock"))
 }
 
+#[cfg(unix)]
 fn ipc_request(request: &str) -> Result<String, String> {
     let path = socket_path();
 
@@ -186,6 +189,13 @@ fn ipc_request(request: &str) -> Result<String, String> {
     }
 
     Ok(response)
+}
+
+#[cfg(windows)]
+fn ipc_request(request: &str) -> Result<String, String> {
+    Err(
+        "AL80 Windows IPC transport is pending Windows Foundation Named Pipe stage".to_string(),
+    )
 }
 
 fn parse_fields(response: &str) -> Vec<(&str, &str)> {
