@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use al80_core::windows_ipc::{NamedPipeListener, NamedPipeStream};
 use al80_core::auto_lcd_feedback::{auto_lcd_policy, AutoLcdPolicy};
 use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
@@ -1344,10 +1346,50 @@ fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, Stri
 }
 
 #[cfg(windows)]
+fn handle_client_windows(stream: NamedPipeStream, shared: SharedDevice) {
+    let mut reader = BufReader::new(stream);
+    let mut request = String::new();
+
+    match reader.read_line(&mut request) {
+        Ok(0) => return,
+        Ok(_) => {}
+        Err(error) => {
+            let _ = writeln!(reader.get_mut(), "ERR read_failed={error}");
+            return;
+        }
+    }
+
+    let request = request.trim();
+
+    let response = match handle_request(request, &shared) {
+        Ok(response) => response,
+        Err(error) => format!("ERR {error}"),
+    };
+
+    let _ = writeln!(reader.get_mut(), "{response}");
+}
+
+#[cfg(windows)]
 fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, String> {
-    Err(
-        "AL80 Windows Named Pipe server is pending Windows Foundation IPC stage".to_string(),
-    )
+    let listener = NamedPipeListener::bind_default()?;
+    println!("AL80D_WINDOWS_PIPE={}", listener.name());
+
+    Ok(thread::spawn(move || loop {
+        match listener.accept() {
+            Ok(stream) => {
+                let shared = Arc::clone(&shared);
+
+                thread::spawn(move || {
+                    handle_client_windows(stream, shared);
+                });
+            }
+
+            Err(error) => {
+                eprintln!("AL80D_WINDOWS_PIPE_ACCEPT_ERROR={error}");
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }))
 }
 
 fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHandle<()>), String> {

@@ -43,5 +43,8 @@ jobs:
       - name: Core native Windows test compile
         run: cargo test --manifest-path core/Cargo.toml --no-run
 
+      - name: Windows Named Pipe IPC round trip
+        run: cargo test --manifest-path core/Cargo.toml windows_named_pipe_round_trip -- --nocapture
+
       - name: Tauri native Windows check
         run: cargo check --manifest-path app/src-tauri/Cargo.toml

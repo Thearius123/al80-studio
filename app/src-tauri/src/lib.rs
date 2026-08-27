@@ -193,9 +193,7 @@ fn ipc_request(request: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 fn ipc_request(request: &str) -> Result<String, String> {
-    Err(
-        "AL80 Windows IPC transport is pending Windows Foundation Named Pipe stage".to_string(),
-    )
+    al80_core::windows_ipc::request(request)
 }
 
 fn parse_fields(response: &str) -> Vec<(&str, &str)> {

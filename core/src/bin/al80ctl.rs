@@ -57,9 +57,7 @@ fn request(command: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 fn request(command: &str) -> Result<String, String> {
-    Err(
-        "AL80 Windows IPC transport is pending Windows Foundation Named Pipe stage".to_string(),
-    )
+    al80_core::windows_ipc::request(command)
 }
 
 fn help() {

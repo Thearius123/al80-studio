@@ -37,3 +37,23 @@ changing the known-good Linux behavior.
 Do not call Windows production-ready until physical Windows validation passes
 for HID, Live Digital Twin, Creator, LCD, Input Router/Event Bridge, host
 audio, reconnect behavior, and installer lifecycle.
+
+### Stage B candidate — Windows Named Pipe IPC
+
+The Stage B candidate replaces the Stage A fail-closed Windows IPC stubs with
+a real local Win32 Named Pipe transport.
+
+Design properties:
+
+- Linux keeps the existing Unix-domain socket implementation unchanged.
+- Windows uses a per-user `\\.\pipe\al80d-<USERNAME>` endpoint.
+- remote Named Pipe clients are rejected.
+- `al80d.exe` remains the single IPC server / single HID owner.
+- `al80ctl.exe` and the Tauri GUI are clients only.
+- the existing line-oriented typed command protocol is preserved.
+- connection attempts fail after a bounded three-second connect window.
+- native `windows-latest` CI performs a real server/client `PING` / `OK PONG`
+  Named Pipe round trip without requiring keyboard hardware.
+
+Stage B is build/IPC validated only after the native Windows CI gate passes.
+Physical keyboard control remains pending the Windows HID stage.

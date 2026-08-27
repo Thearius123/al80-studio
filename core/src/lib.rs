@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub mod windows_ipc;
 pub mod input_event_bridge;
 pub mod raw_hid_session;
 
