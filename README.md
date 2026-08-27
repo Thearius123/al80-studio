@@ -2,7 +2,7 @@
 
 **Open-source Linux-first control software, device broker, Creator environment, and reverse-engineering platform for the YUNZII AL80 keyboard.**
 
-> **Project status:** Alpha. Core RGB, LCD, input, Creator, Event Bridge, and host-library foundations have physical validation history. The current **Live Digital Twin V1** source is **build-validated** and its final physical validation is pending.
+> **Project status:** Alpha. Core RGB, LCD, input, Creator, Event Bridge, and host-library foundations have physical validation history. The current **Live Digital Twin V1** source is **build-validated** and its final physical validation is complete.
 
 AL80 Studio is an unofficial community project. It is not affiliated with, sponsored by, or endorsed by YUNZII.
 
@@ -42,9 +42,9 @@ The project is building a reusable and documented platform around the AL80 with 
 | GUI | Futuristic workstation UI | Active development |
 | Digital Twin | Creator scroll preservation | Build validated |
 | Digital Twin | Pointer-orbit 3D with editable keys | Build validated |
-| Digital Twin | Firmware-backed 82-LED telemetry (`0x4D`) | **Physical validation pending** |
-| Digital Twin | Dashboard Snake/Creator live mirror | **Physical validation pending** |
-| LCD Twin | Host logical-state mirror | **Physical validation pending** |
+| Digital Twin | Firmware-backed 82-LED telemetry (`0x4D`) | **physical validation complete** |
+| Digital Twin | Dashboard Snake/Creator live mirror | **physical validation complete** |
+| LCD Twin | Host logical-state mirror | **physical validation complete** |
 | Windows | Native backend | Roadmap |
 
 ### Current Live Digital Twin truth boundary
@@ -520,3 +520,9 @@ See [`LICENSING.md`](LICENSING.md).
 YUNZII and AL80 are used only to identify compatible hardware.
 
 **This project is unofficial and is not sponsored, endorsed, or maintained by YUNZII.**
+
+### Live Digital Twin V1 physical validation
+
+Live Digital Twin V1 has completed physical AL80 validation, including 82-LED `0x4D` telemetry, moving Snake frames, exact Creator frames, LCD logical mirroring, 3D/scroll UI behavior, and knob/Event Bridge regression while live polling was active.
+
+See [`docs/validation/live-digital-twin-v1-physical.md`](docs/validation/live-digital-twin-v1-physical.md).

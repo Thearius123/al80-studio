@@ -51,7 +51,7 @@ SHA256:
 ad96f337461da5d108814cdb46fc56116bdd3dcadbe657dad40db638a2e680e6
 ```
 
-Physical validation is pending because hardware was not available for the final pass.
+physical validation is complete because hardware was not available for the final pass.
 
 ## Truth boundaries
 
@@ -64,3 +64,16 @@ Physical validation is pending because hardware was not available for the final 
 Native QMK effects outside that path remain fail-closed/unavailable for exact host mirroring.
 
 The LCD candidate reports host-driven logical state, not arbitrary pixel framebuffer readback.
+
+## Live Digital Twin V1 physical validation
+
+- `LIVE_DIGITAL_TWIN_V1_PHYSICAL=PASS`
+- Raw HID `0x4D`: PASS
+- 82-LED telemetry: PASS
+- Snake live telemetry: PASS
+- Creator exact 82-LED mirror: PASS
+- LCD logical mirror: PASS
+- Router OFF fallback: PASS
+- Router ON Event Bridge: PASS
+- Live Twin polling + knob regression: PASS
+- validation record: `docs/validation/live-digital-twin-v1-physical.md`
