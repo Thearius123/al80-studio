@@ -49,6 +49,9 @@ jobs:
       - name: Windows HID transport contract tests
         run: cargo test --manifest-path core/Cargo.toml windows_hid_ -- --nocapture
 
+      - name: Windows Core Audio contract tests
+        run: cargo test --manifest-path core/Cargo.toml windows_core_audio_ -- --nocapture
+
       - name: Windows HID read-only enumeration
         shell: pwsh
         run: |

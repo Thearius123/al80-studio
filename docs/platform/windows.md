@@ -113,3 +113,27 @@ Windows product behavior.
 Physical Windows HID remains pending until the same read-only enumerator is run
 on an actual Windows machine with the AL80 attached. Controlled volatile
 protocol transactions come only after that read-only physical gate.
+
+### Stage D1 candidate — Windows Core Audio backend foundation
+
+Stage D1 replaces runtime-failing Linux audio-command paths on Windows with a
+native Core Audio backend while preserving the daemon audio contract.
+
+The Windows backend obtains the default render endpoint through
+`IMMDeviceEnumerator`, activates `IAudioEndpointVolume`, reads the actual
+master-volume scalar and mute state, normalizes them into the existing
+`VolumeState`, and feeds changes into the established `run_audio_session`
+debounce plus LCD generation/HOME-restoration path.
+
+The Windows watcher periodically rebinds the default render endpoint so output
+device changes do not permanently pin the daemon to a stale endpoint. GUI and
+CLI audio access remain behind daemon IPC.
+
+Linux retains `wpctl get-volume` and `pactl subscribe`.
+
+Stage D1 native Windows CI is hardware-free. Physical Windows host-audio
+behavior remains pending until volume/mute changes and LCD feedback are tested
+on an actual Windows machine.
+
+Stage D1 does not change HID ownership, firmware, EEPROM, persistent LCD state,
+or installer/release status.

@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
@@ -290,6 +291,7 @@ fn socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/al80d-{user}.sock"))
 }
 
+#[cfg(unix)]
 fn read_volume() -> Result<VolumeState, String> {
     let output = Command::new("/usr/bin/wpctl")
         .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
@@ -320,6 +322,139 @@ fn read_volume() -> Result<VolumeState, String> {
 
     Ok(VolumeState { percent, muted })
 }
+
+#[cfg(windows)]
+struct WindowsComApartment;
+
+#[cfg(windows)]
+impl WindowsComApartment {
+    fn initialize() -> Result<Self, String> {
+        use windows::Win32::System::Com::{
+            CoInitializeEx, COINIT_MULTITHREADED,
+        };
+
+        let status = unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+        };
+
+        status
+            .ok()
+            .map_err(|error| {
+                format!(
+                    "Windows Core Audio COM initialization failed: {error}"
+                )
+            })?;
+
+        Ok(Self)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsComApartment {
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::System::Com::CoUninitialize();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_default_endpoint_volume(
+) -> Result<
+    windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
+    String,
+> {
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
+    };
+
+    let enumerator: IMMDeviceEnumerator = unsafe {
+        CoCreateInstance(
+            &MMDeviceEnumerator,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+    }
+    .map_err(|error| {
+        format!(
+            "Windows Core Audio MMDeviceEnumerator failed: {error}"
+        )
+    })?;
+
+    let device = unsafe {
+        enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+    }
+    .map_err(|error| {
+        format!(
+            "Windows Core Audio default render endpoint failed: {error}"
+        )
+    })?;
+
+    let endpoint: IAudioEndpointVolume = unsafe {
+        device.Activate(CLSCTX_ALL, None)
+    }
+    .map_err(|error| {
+        format!(
+            "Windows Core Audio endpoint-volume activation failed: {error}"
+        )
+    })?;
+
+    Ok(endpoint)
+}
+
+#[cfg(windows)]
+fn windows_scalar_to_percent(value: f32) -> Result<u8, String> {
+    if !value.is_finite() {
+        return Err(
+            "Windows Core Audio returned a non-finite master-volume scalar"
+                .to_string(),
+        );
+    }
+
+    let percent = (value.clamp(0.0, 1.0) * 100.0).round();
+
+    Ok(percent as u8)
+}
+
+#[cfg(windows)]
+fn windows_endpoint_state(
+    endpoint: &windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
+) -> Result<VolumeState, String> {
+    let scalar = unsafe {
+        endpoint.GetMasterVolumeLevelScalar()
+    }
+    .map_err(|error| {
+        format!(
+            "Windows Core Audio master-volume read failed: {error}"
+        )
+    })?;
+
+    let muted = unsafe {
+        endpoint.GetMute()
+    }
+    .map_err(|error| {
+        format!(
+            "Windows Core Audio mute-state read failed: {error}"
+        )
+    })?;
+
+    Ok(VolumeState {
+        percent: windows_scalar_to_percent(scalar)?,
+        muted: muted.0 != 0,
+    })
+}
+
+#[cfg(windows)]
+fn read_volume() -> Result<VolumeState, String> {
+    let _com = WindowsComApartment::initialize()?;
+    let endpoint = windows_default_endpoint_volume()?;
+    windows_endpoint_state(&endpoint)
+}
+
 
 fn lcd_home_direct(shared: &SharedDevice) -> Result<(), String> {
     let mut owner = lock_device(shared)?;
@@ -1392,13 +1527,143 @@ fn start_ipc_server(shared: SharedDevice) -> Result<thread::JoinHandle<()>, Stri
     }))
 }
 
-fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHandle<()>), String> {
+struct AudioReader {
+    rx: mpsc::Receiver<String>,
+    worker: Option<thread::JoinHandle<()>>,
+
+    #[cfg(unix)]
+    child: Child,
+
+    #[cfg(windows)]
+    stop_tx: Option<mpsc::Sender<()>>,
+}
+
+impl AudioReader {
+    fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<String, mpsc::RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
+    }
+
+    fn shutdown(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(stop_tx) = self.stop_tx.take() {
+                let _ = stop_tx.send(());
+            }
+        }
+
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
+    fn health_error(&mut self) -> Result<Option<String>, String> {
+        #[cfg(unix)]
+        {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|error| {
+                    format!("pactl poll failed: {error}")
+                })?
+            {
+                if let Some(worker) = self.worker.take() {
+                    let _ = worker.join();
+                }
+
+                return Ok(Some(format!(
+                    "pactl subscribe exited: {status}"
+                )));
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let finished = self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished());
+
+            if finished {
+                if let Some(worker) = self.worker.take() {
+                    let _ = worker.join();
+                }
+
+                return Ok(Some(
+                    "Windows Core Audio watcher exited".to_string(),
+                ));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+fn audio_event_relevant(line: &str) -> Result<bool, String> {
+    Ok(
+        line.contains("Event 'change' on sink")
+            || line.contains("Event 'change' on server"),
+    )
+}
+
+#[cfg(windows)]
+fn audio_event_relevant(line: &str) -> Result<bool, String> {
+    if let Some(error) = line.strip_prefix("CORE_AUDIO_ERROR=") {
+        return Err(error.to_string());
+    }
+
+    Ok(line == "CORE_AUDIO_CHANGE")
+}
+
+#[cfg(unix)]
+fn audio_event_mode() -> &'static str {
+    "PACTL_SUBSCRIBE"
+}
+
+#[cfg(windows)]
+fn audio_event_mode() -> &'static str {
+    "WINDOWS_CORE_AUDIO"
+}
+
+#[cfg(unix)]
+fn audio_watch_mode() -> &'static str {
+    "EVENT_DRIVEN"
+}
+
+#[cfg(windows)]
+fn audio_watch_mode() -> &'static str {
+    "CORE_AUDIO_WATCH"
+}
+
+#[cfg(unix)]
+fn audio_reader_disconnected_error() -> &'static str {
+    "pactl subscribe reader disconnected"
+}
+
+#[cfg(windows)]
+fn audio_reader_disconnected_error() -> &'static str {
+    "Windows Core Audio watcher disconnected"
+}
+
+#[cfg(unix)]
+fn start_audio_reader() -> Result<AudioReader, String> {
     let mut child = Command::new("/usr/bin/pactl")
         .arg("subscribe")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("pactl subscribe failed: {e}"))?;
+        .map_err(|error| {
+            format!("pactl subscribe failed: {error}")
+        })?;
 
     let stdout = child
         .stdout
@@ -1407,7 +1672,7 @@ fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHa
 
     let (tx, rx) = mpsc::channel();
 
-    let handle = thread::spawn(move || {
+    let worker = thread::spawn(move || {
         let reader = BufReader::new(stdout);
 
         for line in reader.lines() {
@@ -1417,12 +1682,144 @@ fn start_audio_reader() -> Result<(Child, mpsc::Receiver<String>, thread::JoinHa
                         break;
                     }
                 }
+
                 Err(_) => break,
             }
         }
     });
 
-    Ok((child, rx, handle))
+    Ok(AudioReader {
+        rx,
+        worker: Some(worker),
+        child,
+    })
+}
+
+#[cfg(windows)]
+fn start_audio_reader() -> Result<AudioReader, String> {
+    const REBIND_INTERVAL: Duration = Duration::from_secs(1);
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) =
+        mpsc::sync_channel::<Result<(), String>>(1);
+
+    let worker = thread::spawn(move || {
+        let _com = match WindowsComApartment::initialize() {
+            Ok(com) => com,
+
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+
+        let mut endpoint = match windows_default_endpoint_volume() {
+            Ok(endpoint) => endpoint,
+
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+
+        let mut observed = match windows_endpoint_state(&endpoint) {
+            Ok(state) => state,
+
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+
+        if ready_tx.send(Ok(())).is_err() {
+            return;
+        }
+
+        let mut last_rebind = Instant::now();
+
+        loop {
+            match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            if last_rebind.elapsed() >= REBIND_INTERVAL {
+                match windows_default_endpoint_volume() {
+                    Ok(new_endpoint) => {
+                        endpoint = new_endpoint;
+                        last_rebind = Instant::now();
+                    }
+
+                    Err(error) => {
+                        let _ = event_tx.send(format!(
+                            "CORE_AUDIO_ERROR={error}"
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            let current = match windows_endpoint_state(&endpoint) {
+                Ok(state) => state,
+
+                Err(error) => {
+                    let _ = event_tx.send(format!(
+                        "CORE_AUDIO_ERROR={error}"
+                    ));
+                    break;
+                }
+            };
+
+            if current != observed {
+                observed = current;
+
+                if event_tx
+                    .send("CORE_AUDIO_CHANGE".to_string())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(())) => {}
+
+        Ok(Err(error)) => {
+            let _ = worker.join();
+            return Err(error);
+        }
+
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = stop_tx.send(());
+            let _ = worker.join();
+
+            return Err(
+                "Windows Core Audio watcher initialization timed out"
+                    .to_string(),
+            );
+        }
+
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+
+            return Err(
+                "Windows Core Audio watcher initialization disconnected"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(AudioReader {
+        rx: event_rx,
+        worker: Some(worker),
+        stop_tx: Some(stop_tx),
+    })
 }
 
 fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
@@ -1439,9 +1836,9 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
     let mut last_change_at: Option<Instant> = None;
     let mut home_sent = true;
 
-    let (mut child, rx, reader_thread) = start_audio_reader()?;
+    let mut audio_reader = start_audio_reader()?;
 
-    println!("AL80D_AUDIO_EVENT_MODE=PACTL_SUBSCRIBE");
+    println!("AL80D_AUDIO_EVENT_MODE={}", audio_event_mode());
     println!(
         "AL80D_WATCHER_READY=YES INITIAL_VOLUME={}",
         if observed.muted {
@@ -1452,10 +1849,9 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
     );
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        match audio_reader.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
-                let relevant = line.contains("Event 'change' on sink")
-                    || line.contains("Event 'change' on server");
+                let relevant = audio_event_relevant(&line)?;
 
                 if relevant {
                     let current = read_volume()?;
@@ -1509,10 +1905,8 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
 
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader_thread.join();
-                return Err("pactl subscribe reader disconnected".to_string());
+                audio_reader.shutdown();
+                return Err(audio_reader_disconnected_error().to_string());
             }
         }
 
@@ -1572,12 +1966,8 @@ fn run_audio_session(shared: &SharedDevice) -> Result<(), String> {
             }
         }
 
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| format!("pactl poll failed: {e}"))?
-        {
-            let _ = reader_thread.join();
-            return Err(format!("pactl subscribe exited: {status}"));
+        if let Some(error) = audio_reader.health_error()? {
+            return Err(error);
         }
     }
 }
@@ -1586,7 +1976,7 @@ fn main() {
     println!("AL80D=START");
     println!("AL80D_VERSION=0.6.0");
     println!("AL80D_DEVICE_OWNERSHIP=SINGLE_PROCESS");
-    println!("AL80D_AUDIO_WATCH=EVENT_DRIVEN");
+    println!("AL80D_AUDIO_WATCH={}", audio_watch_mode());
     println!("AL80D_HOST_SETTLE_MS=50");
     println!("AL80D_HOME_IDLE_MS=3000");
     println!("AL80D_INPUT_EVENT_BRIDGE_HOST=YES");
@@ -1705,5 +2095,38 @@ mod input_event_pump_tests {
 
         assert!(line.contains("SEQ_STATE=GAP"));
         assert!(line.contains("ACTION_NAME=CREATOR_SCENE_OFF"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_core_audio_contract_tests {
+    use super::*;
+
+    #[test]
+    fn windows_core_audio_scalar_contract_edges() {
+        assert_eq!(windows_scalar_to_percent(0.0).unwrap(), 0);
+        assert_eq!(windows_scalar_to_percent(0.5).unwrap(), 50);
+        assert_eq!(windows_scalar_to_percent(1.0).unwrap(), 100);
+    }
+
+    #[test]
+    fn windows_core_audio_scalar_contract_clamps() {
+        assert_eq!(windows_scalar_to_percent(-1.0).unwrap(), 0);
+        assert_eq!(windows_scalar_to_percent(2.0).unwrap(), 100);
+    }
+
+    #[test]
+    fn windows_core_audio_scalar_contract_rejects_non_finite() {
+        assert!(windows_scalar_to_percent(f32::NAN).is_err());
+        assert!(windows_scalar_to_percent(f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn windows_core_audio_event_contract() {
+        assert!(audio_event_relevant("CORE_AUDIO_CHANGE").unwrap());
+        assert!(!audio_event_relevant("unrelated").unwrap());
+        assert!(
+            audio_event_relevant("CORE_AUDIO_ERROR=synthetic").is_err()
+        );
     }
 }
