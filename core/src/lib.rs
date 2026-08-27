@@ -259,8 +259,7 @@ impl DeviceInfo {
 
         if candidates.len() != 1 {
             return Err(format!(
-                "expected exactly one AL80 Windows Raw HID interface "
-                    "VID=28E9 PID=30AF usage=FF60:0061, found {}",
+                "expected exactly one AL80 Windows Raw HID interface VID=28E9 PID=30AF usage=FF60:0061, found {}",
                 candidates.len()
             ));
         }
