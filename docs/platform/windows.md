@@ -137,3 +137,25 @@ on an actual Windows machine.
 
 Stage D1 does not change HID ownership, firmware, EEPROM, persistent LCD state,
 or installer/release status.
+
+### Stage D2A — physical Windows HID read-only validation package
+
+Stage D2A adds `al80-hid-enumerate.exe` and
+`validate-d2a-readonly.ps1` to the Windows preview artifact.
+
+The D2A validator is deliberately fail-closed:
+
+- `al80d` must not already be running,
+- the validator starts no daemon,
+- it performs HID enumeration only,
+- the exact AL80 Raw HID filter must produce exactly one match,
+- the diagnostic must explicitly report `AL80_WINDOWS_HID_OPEN=NO`,
+- the diagnostic must explicitly report `AL80_WINDOWS_HID_WRITE=NO`.
+
+A D2A PASS proves physical Windows enumeration for
+VID `28E9`, PID `30AF`, usage page `FF60`, usage `0061`.
+It does not prove protocol transactions, LCD writes, RGB writes,
+Core Audio physical behavior, startup behavior, or installer behavior.
+
+Controlled runtime/device validation belongs to Stage D2B and only follows a
+successful D2A run on the actual Windows machine.

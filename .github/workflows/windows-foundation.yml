@@ -71,7 +71,7 @@ jobs:
         run: cargo check --manifest-path app/src-tauri/Cargo.toml
 
       - name: Windows runtime preview build
-        run: cargo build --release --manifest-path core/Cargo.toml --bin al80d --bin al80ctl
+        run: cargo build --release --manifest-path core/Cargo.toml --bin al80d --bin al80ctl --bin al80-hid-enumerate
 
       - name: Windows packaging preview build
         working-directory: app
@@ -90,9 +90,11 @@ jobs:
           $appRelease = Join-Path $app.target_directory 'release'
           $al80d = Join-Path $coreRelease 'al80d.exe'
           $al80ctl = Join-Path $coreRelease 'al80ctl.exe'
+          $enumerator = Join-Path $coreRelease 'al80-hid-enumerate.exe'
 
           if (-not (Test-Path $al80d)) { throw 'al80d.exe preview missing' }
           if (-not (Test-Path $al80ctl)) { throw 'al80ctl.exe preview missing' }
+          if (-not (Test-Path $enumerator)) { throw 'al80-hid-enumerate.exe preview missing' }
 
           $appPackage = $app.packages | Where-Object { $_.manifest_path -like '*app/src-tauri/Cargo.toml' -or $_.manifest_path -like '*app\src-tauri\Cargo.toml' } | Select-Object -First 1
           if ($null -eq $appPackage) { $appPackage = $app.packages | Select-Object -First 1 }
@@ -103,6 +105,8 @@ jobs:
 
           Copy-Item $al80d (Join-Path $preview 'al80d.exe')
           Copy-Item $al80ctl (Join-Path $preview 'al80ctl.exe')
+          Copy-Item $enumerator (Join-Path $preview 'al80-hid-enumerate.exe')
+          Copy-Item 'tools/windows/validate-d2a-readonly.ps1' (Join-Path $preview 'validate-d2a-readonly.ps1')
           Copy-Item $appExe (Join-Path $preview ($appTarget.name + '.exe'))
 
           Get-ChildItem $preview -File | ForEach-Object {
