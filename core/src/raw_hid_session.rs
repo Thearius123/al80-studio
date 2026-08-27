@@ -1,5 +1,5 @@
+use crate::hid_transport::RawHidTransport;
 use std::collections::VecDeque;
-use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
@@ -87,7 +87,7 @@ pub struct RawHidSession {
 }
 
 impl RawHidSession {
-    pub fn new(file: File) -> Result<Self, String> {
+    pub fn new(file: RawHidTransport) -> Result<Self, String> {
         let (command_tx, command_rx) = mpsc::channel();
 
         let event_queue = Arc::new(Mutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)));
@@ -215,7 +215,7 @@ impl Drop for RawHidSession {
 }
 
 fn worker_main(
-    mut file: File,
+    mut file: RawHidTransport,
     command_rx: Receiver<WorkerCommand>,
     event_queue: Arc<Mutex<VecDeque<HostInputEvent>>>,
     stats: Arc<AtomicStats>,
@@ -389,7 +389,7 @@ fn queue_event(
 }
 
 fn write_report(
-    file: &mut File,
+    file: &mut RawHidTransport,
     payload: &[u8; EVENT_REPORT_BYTES],
     timeout: Duration,
 ) -> Result<(), String> {
@@ -426,7 +426,7 @@ fn write_report(
     Ok(())
 }
 
-fn read_one_report(file: &mut File) -> Result<Option<[u8; EVENT_REPORT_BYTES]>, String> {
+fn read_one_report(file: &mut RawHidTransport) -> Result<Option<[u8; EVENT_REPORT_BYTES]>, String> {
     let mut buffer = [0u8; REPORT_WITH_ID_BYTES];
 
     match file.read(&mut buffer) {

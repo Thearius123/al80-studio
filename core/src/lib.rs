@@ -1,12 +1,14 @@
 #[cfg(windows)]
 pub mod windows_ipc;
 pub mod input_event_bridge;
+mod hid_transport;
 pub mod raw_hid_session;
 
 pub mod auto_lcd_feedback;
 pub mod lcd_feedback;
 
-use std::fs::{self, File, OpenOptions};
+use crate::hid_transport::RawHidTransport;
+use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,9 @@ const O_NONBLOCK_LINUX: i32 = 0x800;
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub devnode: PathBuf,
+
+    #[cfg(windows)]
+    hid_path: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -218,18 +223,71 @@ pub struct Al80 {
 impl DeviceInfo {
     #[cfg(windows)]
     pub fn discover() -> Result<Self, String> {
-        Err(
-            "AL80 Windows HID backend is pending Windows Foundation HID stage"
-                .to_string(),
-        )
+        const WINDOWS_VID: u16 = 0x28E9;
+        const WINDOWS_PID: u16 = 0x30AF;
+        const RAW_USAGE_PAGE: u16 = 0xFF60;
+        const RAW_USAGE: u16 = 0x0061;
+
+        let api = hidapi::HidApi::new()
+            .map_err(|error| format!("cannot initialize Windows HIDAPI: {error}"))?;
+
+        let mut candidates = api
+            .device_list()
+            .filter(|device| {
+                device.vendor_id() == WINDOWS_VID
+                    && device.product_id() == WINDOWS_PID
+                    && device.usage_page() == RAW_USAGE_PAGE
+                    && device.usage() == RAW_USAGE
+            })
+            .map(|device| {
+                let hid_path = device.path().to_bytes().to_vec();
+                let display_path =
+                    device.path().to_string_lossy().into_owned();
+
+                Self {
+                    devnode: PathBuf::from(display_path),
+                    hid_path,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| {
+            left.devnode
+                .to_string_lossy()
+                .cmp(&right.devnode.to_string_lossy())
+        });
+
+        if candidates.len() != 1 {
+            return Err(format!(
+                "expected exactly one AL80 Windows Raw HID interface "
+                    "VID=28E9 PID=30AF usage=FF60:0061, found {}",
+                candidates.len()
+            ));
+        }
+
+        Ok(candidates.remove(0))
     }
 
     #[cfg(windows)]
-    fn open(&self) -> Result<File, String> {
-        Err(
-            "AL80 Windows HID transport is pending Windows Foundation HID stage"
-                .to_string(),
-        )
+    fn open(&self) -> Result<RawHidTransport, String> {
+        use std::ffi::CString;
+
+        let path = CString::new(self.hid_path.clone())
+            .map_err(|_| "Windows AL80 HID path contains an interior NUL".to_string())?;
+
+        let api = hidapi::HidApi::new()
+            .map_err(|error| format!("cannot initialize Windows HIDAPI: {error}"))?;
+
+        let device = api
+            .open_path(path.as_c_str())
+            .map_err(|error| {
+                format!(
+                    "cannot open Windows AL80 Raw HID {}: {error}",
+                    self.devnode.display()
+                )
+            })?;
+
+        Ok(RawHidTransport::from_windows_device(device))
     }
 
     #[cfg(unix)]
@@ -295,13 +353,15 @@ impl DeviceInfo {
     }
 
     #[cfg(unix)]
-    fn open(&self) -> Result<File, String> {
-        OpenOptions::new()
+    fn open(&self) -> Result<RawHidTransport, String> {
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(O_NONBLOCK_LINUX)
             .open(&self.devnode)
-            .map_err(|e| format!("cannot open {}: {e}", self.devnode.display()))
+            .map_err(|e| format!("cannot open {}: {e}", self.devnode.display()))?;
+
+        Ok(RawHidTransport::from_linux_file(file))
     }
 }
 

@@ -46,5 +46,8 @@ jobs:
       - name: Windows Named Pipe IPC round trip
         run: cargo test --manifest-path core/Cargo.toml windows_named_pipe_round_trip -- --nocapture
 
+      - name: Windows HID transport contract tests
+        run: cargo test --manifest-path core/Cargo.toml windows_hid_ -- --nocapture
+
       - name: Tauri native Windows check
         run: cargo check --manifest-path app/src-tauri/Cargo.toml

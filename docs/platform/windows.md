@@ -57,3 +57,35 @@ Design properties:
 
 Stage B is build/IPC validated only after the native Windows CI gate passes.
 Physical keyboard control remains pending the Windows HID stage.
+
+### Stage C1 candidate — Windows HID transport
+
+Stage C1 introduces the narrow Raw HID transport boundary required for native
+Windows hardware access.
+
+Linux behavior is intentionally preserved:
+
+- Linux discovery still uses `/sys/class/hidraw`.
+- Linux opens the same `/dev/hidrawN` node with the existing nonblocking flags.
+- the existing `RawHidSession` remains the single I/O worker.
+- `al80d` remains the only long-lived device owner.
+- GUI and `al80ctl` still communicate only through local IPC.
+
+Windows behavior:
+
+- `hidapi` is a Windows-only dependency using its `windows-native` backend.
+- discovery filters VID `0x28E9`, PID `0x30AF`, usage page `0xFF60`,
+  usage `0x0061`.
+- the selected HID path is preserved exactly for open-by-path.
+- writes keep the existing 33-byte framing: report ID `0x00` followed by the
+  32-byte AL80 protocol payload.
+- Windows `read_timeout` is normalized back into that same internal
+  report-ID-prefixed framing so the established Raw HID demultiplexer and
+  Input Event Bridge do not gain a second reader.
+
+The native Windows CI gate validates compilation plus framing contracts without
+requiring keyboard hardware.
+
+Stage C1 is **not physical Windows validation**. No production-ready Windows
+HID claim is made until an actual AL80 is attached to a Windows host and
+read-only discovery/status plus controlled volatile protocol transactions pass.
