@@ -89,3 +89,27 @@ requiring keyboard hardware.
 Stage C1 is **not physical Windows validation**. No production-ready Windows
 HID claim is made until an actual AL80 is attached to a Windows host and
 read-only discovery/status plus controlled volatile protocol transactions pass.
+
+### Stage C2 candidate — read-only enumeration and packaging preview
+
+Stage C2 adds a Windows-only HID enumeration diagnostic that uses the exact
+shared C1 VID/PID/usage filter but deliberately never opens the interface and
+never starts a Raw HID session.
+
+The native Windows CI now validates:
+
+- read-only HID enumeration through the Windows `hidapi` backend,
+- the enumeration path returns a deterministic match count even when a hosted
+  runner has no AL80 attached,
+- the diagnostic binary contains no device-open or protocol-write path,
+- `al80d.exe` and `al80ctl.exe` build in Windows release mode,
+- the Tauri application builds in production mode with `--no-bundle`,
+- a preview artifact contains the Windows executables and SHA-256 manifest.
+
+This preview artifact is **not an installer or release**. It does not prove
+Windows Core Audio, startup integration, physical AL80 I/O, or end-to-end
+Windows product behavior.
+
+Physical Windows HID remains pending until the same read-only enumerator is run
+on an actual Windows machine with the AL80 attached. Controlled volatile
+protocol transactions come only after that read-only physical gate.

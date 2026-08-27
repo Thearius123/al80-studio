@@ -222,7 +222,7 @@ pub struct Al80 {
 
 impl DeviceInfo {
     #[cfg(windows)]
-    pub fn discover() -> Result<Self, String> {
+    fn windows_raw_hid_candidates() -> Result<Vec<Self>, String> {
         const WINDOWS_VID: u16 = 0x28E9;
         const WINDOWS_PID: u16 = 0x30AF;
         const RAW_USAGE_PAGE: u16 = 0xFF60;
@@ -257,6 +257,21 @@ impl DeviceInfo {
                 .cmp(&right.devnode.to_string_lossy())
         });
 
+        Ok(candidates)
+    }
+
+    #[cfg(windows)]
+    pub fn enumerate_windows_read_only() -> Result<Vec<PathBuf>, String> {
+        Ok(Self::windows_raw_hid_candidates()?
+            .into_iter()
+            .map(|device| device.devnode)
+            .collect())
+    }
+
+    #[cfg(windows)]
+    pub fn discover() -> Result<Self, String> {
+        let mut candidates = Self::windows_raw_hid_candidates()?;
+
         if candidates.len() != 1 {
             return Err(format!(
                 "expected exactly one AL80 Windows Raw HID interface VID=28E9 PID=30AF usage=FF60:0061, found {}",
@@ -265,28 +280,6 @@ impl DeviceInfo {
         }
 
         Ok(candidates.remove(0))
-    }
-
-    #[cfg(windows)]
-    fn open(&self) -> Result<RawHidTransport, String> {
-        use std::ffi::CString;
-
-        let path = CString::new(self.hid_path.clone())
-            .map_err(|_| "Windows AL80 HID path contains an interior NUL".to_string())?;
-
-        let api = hidapi::HidApi::new()
-            .map_err(|error| format!("cannot initialize Windows HIDAPI: {error}"))?;
-
-        let device = api
-            .open_path(path.as_c_str())
-            .map_err(|error| {
-                format!(
-                    "cannot open Windows AL80 Raw HID {}: {error}",
-                    self.devnode.display()
-                )
-            })?;
-
-        Ok(RawHidTransport::from_windows_device(device))
     }
 
     #[cfg(unix)]

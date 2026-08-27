@@ -49,5 +49,70 @@ jobs:
       - name: Windows HID transport contract tests
         run: cargo test --manifest-path core/Cargo.toml windows_hid_ -- --nocapture
 
+      - name: Windows HID read-only enumeration
+        shell: pwsh
+        run: |
+          $output = cargo run --manifest-path core/Cargo.toml --bin al80-hid-enumerate --quiet
+          $output | ForEach-Object { Write-Host $_ }
+          if (-not ($output -match '^AL80_WINDOWS_HID_MATCH_COUNT=\d+$')) {
+            throw 'Missing AL80 Windows HID enumeration count'
+          }
+          if (-not ($output -contains 'AL80_WINDOWS_HID_OPEN=NO')) {
+            throw 'Read-only enumeration open invariant missing'
+          }
+          if (-not ($output -contains 'AL80_WINDOWS_HID_WRITE=NO')) {
+            throw 'Read-only enumeration write invariant missing'
+          }
+
       - name: Tauri native Windows check
         run: cargo check --manifest-path app/src-tauri/Cargo.toml
+
+      - name: Windows runtime preview build
+        run: cargo build --release --manifest-path core/Cargo.toml --bin al80d --bin al80ctl
+
+      - name: Windows packaging preview build
+        working-directory: app
+        run: npm run tauri -- build --no-bundle
+
+      - name: Collect Windows packaging preview
+        shell: pwsh
+        run: |
+          $preview = Join-Path $env:RUNNER_TEMP 'al80-windows-c2-preview'
+          New-Item -ItemType Directory -Force -Path $preview | Out-Null
+
+          $core = cargo metadata --manifest-path core/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json
+          $app = cargo metadata --manifest-path app/src-tauri/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json
+
+          $coreRelease = Join-Path $core.target_directory 'release'
+          $appRelease = Join-Path $app.target_directory 'release'
+          $al80d = Join-Path $coreRelease 'al80d.exe'
+          $al80ctl = Join-Path $coreRelease 'al80ctl.exe'
+
+          if (-not (Test-Path $al80d)) { throw 'al80d.exe preview missing' }
+          if (-not (Test-Path $al80ctl)) { throw 'al80ctl.exe preview missing' }
+
+          $appPackage = $app.packages | Where-Object { $_.manifest_path -like '*app/src-tauri/Cargo.toml' -or $_.manifest_path -like '*app\src-tauri\Cargo.toml' } | Select-Object -First 1
+          if ($null -eq $appPackage) { $appPackage = $app.packages | Select-Object -First 1 }
+          $appTarget = $appPackage.targets | Where-Object { $_.kind -contains 'bin' } | Select-Object -First 1
+          if ($null -eq $appTarget) { throw 'Tauri binary target metadata missing' }
+          $appExe = Join-Path $appRelease ($appTarget.name + '.exe')
+          if (-not (Test-Path $appExe)) { throw ('Tauri preview executable missing: ' + $appExe) }
+
+          Copy-Item $al80d (Join-Path $preview 'al80d.exe')
+          Copy-Item $al80ctl (Join-Path $preview 'al80ctl.exe')
+          Copy-Item $appExe (Join-Path $preview ($appTarget.name + '.exe'))
+
+          Get-ChildItem $preview -File | ForEach-Object {
+            $hash = Get-FileHash $_.FullName -Algorithm SHA256
+            '{0}  {1}' -f $hash.Hash.ToLower(), $_.Name
+          } | Set-Content (Join-Path $preview 'SHA256SUMS.txt')
+
+          Write-Host 'WINDOWS_PACKAGING_PREVIEW=PASS'
+          Get-ChildItem $preview -File | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Upload Windows packaging preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: al80-studio-windows-c2-preview-${{ github.sha }}
+          path: ${{ runner.temp }}/al80-windows-c2-preview
+          if-no-files-found: error
