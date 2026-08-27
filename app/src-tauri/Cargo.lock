@@ -20,6 +20,9 @@ dependencies = [
 [[package]]
 name = "al80-core"
 version = "0.2.0-alpha"
+dependencies = [
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "al80-studio-app"
