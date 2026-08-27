@@ -38,3 +38,22 @@ app/node_modules/
 app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/
+# AL80 Studio public-repository build artifacts
+node_modules/
+app/node_modules/
+app/dist/
+target/
+core/target/
+app/src-tauri/target/
+.build/
+*.bin
+*.hex
+*.elf
+*.map
+*.rmeta
+*.rlib
+*.so
+*.dylib
+*.dll
+*.log
+.DS_Store

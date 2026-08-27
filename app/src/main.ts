@@ -16,6 +16,26 @@ import {
   type HostProfileInputBinding,
 } from "./input-designer";
 
+
+interface LiveRgbTelemetry {
+  version: number;
+  source: string;
+  frameValid: boolean;
+  rgbCoreEnabled: boolean;
+  overlayEnabled: boolean;
+  creatorSceneEnabled: boolean;
+  colors: string[];
+}
+
+interface LcdLogicalStatus {
+  mode: string;
+  generation: number;
+  percent: number | null;
+  muted: boolean;
+  kind: string | null;
+  value: string | null;
+}
+
 type View =
   | "dashboard"
   | "effects"
@@ -224,6 +244,28 @@ let creatorPaintColor = "#7c83ff";
 let creatorTool: CreatorTool = "paint";
 let creatorSelected = new Set<number>();
 let creatorHistory: string[][] = [];
+type CreatorViewMode = "top" | "studio3d";
+type CreatorScaleMode = "fit" | "actual";
+
+let creatorViewMode: CreatorViewMode = "studio3d";
+
+/* AL80 LIVE DIGITAL TWIN V1 */
+let liveRgbTelemetry: LiveRgbTelemetry | null = null;
+let liveLcdStatus: LcdLogicalStatus | null = null;
+let liveTelemetryTimer: number | null = null;
+let liveTelemetryBusy = false;
+let lastRenderedView: View | null = null;
+
+let creatorOrbitX = 9;
+let creatorOrbitY = -1.8;
+let creatorOrbitZoom = 1;
+let creatorOrbitDragging = false;
+let creatorOrbitPointerId: number | null = null;
+let creatorOrbitLastX = 0;
+let creatorOrbitLastY = 0;
+
+let creatorScaleMode: CreatorScaleMode = "fit";
+let creatorMirrorExact = false;
 let creatorInputSource = "draft";
 let creatorEffectId: CreatorEffectId = "snake";
 let creatorEffectPrimary = "#7c83ff";
@@ -295,6 +337,7 @@ function saveCreatorScenes(): void {
 }
 
 function creatorSnapshot(): void {
+  creatorMirrorExact = false;
   creatorHistory.push([...creatorColors]);
   if (creatorHistory.length > 30) creatorHistory.shift();
 }
@@ -766,6 +809,190 @@ function extensionCards(): string {
     .join("");
 }
 
+
+function creatorOrbitClamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function applyCreatorOrbitTransform(): void {
+  const shell = document.querySelector<HTMLElement>(".creator-keyboard-shell");
+  if (!shell) return;
+
+  shell.style.setProperty("--creator-orbit-x", `${creatorOrbitX.toFixed(2)}deg`);
+  shell.style.setProperty("--creator-orbit-y", `${creatorOrbitY.toFixed(2)}deg`);
+  shell.style.setProperty("--creator-orbit-zoom", creatorOrbitZoom.toFixed(4));
+}
+
+function renderLiveKeyboardTwin(): string {
+  if (!creatorLayout) {
+    return `<div class="live-twin-empty">Recovered AL80 layout is not loaded yet.</div>`;
+  }
+
+  const colors = liveRgbTelemetry?.colors ?? [];
+  const width = creatorLayout.layoutWidth;
+  const height = creatorLayout.layoutHeight;
+
+  const keys = creatorLayout.keys
+    .map((key) => {
+      const color = colors[key.ledIndex] ?? "#18212c";
+      return `<div
+        class="live-twin-key"
+        data-live-led="${key.ledIndex}"
+        title="${esc(`${key.label} · LED ${key.ledIndex}`)}"
+        style="left:${(key.x / width) * 100}%;top:${(key.y / height) * 100}%;width:${(key.w / width) * 100}%;height:${(key.h / height) * 100}%;--live-led-color:${esc(color)}"
+      ><span>${esc(key.label)}</span></div>`;
+    })
+    .join("");
+
+  const controls = creatorLayout.controls
+    .map(
+      (control) => `<div
+        class="live-twin-key live-twin-no-rgb"
+        style="left:${(control.x / width) * 100}%;top:${(control.y / height) * 100}%;width:${(control.w / width) * 100}%;height:${(control.h / height) * 100}%"
+      ><span>${esc(control.label)}</span></div>`,
+    )
+    .join("");
+
+  const accents = creatorLayout.accents
+    .map((accent) => {
+      const color = colors[accent.ledIndex] ?? "#18212c";
+      return `<span
+        class="live-twin-accent"
+        data-live-led="${accent.ledIndex}"
+        style="--live-led-color:${esc(color)}"
+      >${esc(accent.label)} · ${accent.ledIndex}</span>`;
+    })
+    .join("");
+
+  return `
+    <div class="live-twin-board">${keys}${controls}</div>
+    <div class="live-twin-accents">${accents}</div>
+  `;
+}
+
+function renderLiveLcdMirror(): string {
+  const lcd = liveLcdStatus;
+
+  if (!lcd) {
+    return `
+      <div class="live-lcd-screen">
+        <span class="live-lcd-kicker">HOST LOGICAL MIRROR</span>
+        <strong id="live-lcd-mode">Awaiting status</strong>
+        <span id="live-lcd-value">—</span>
+        <small id="live-lcd-detail">No LCD semantic state received yet.</small>
+      </div>
+    `;
+  }
+
+  const value =
+    lcd.mode === "VOLUME" || lcd.mode === "MUTE"
+      ? `${lcd.percent ?? 0}%`
+      : lcd.mode === "FEEDBACK"
+        ? `${lcd.kind ?? "FEEDBACK"} · ${lcd.value ?? "—"}`
+        : "Normal keyboard screen";
+
+  const detail =
+    lcd.mode === "HOME"
+      ? "HOME semantic state"
+      : lcd.mode === "MUTE"
+        ? "Host audio is muted"
+        : lcd.mode === "VOLUME"
+          ? "Host volume OSD"
+          : "Typed transient feedback";
+
+  return `
+    <div class="live-lcd-screen">
+      <span class="live-lcd-kicker">HOST LOGICAL MIRROR</span>
+      <strong id="live-lcd-mode">${esc(lcd.mode)}</strong>
+      <span id="live-lcd-value">${esc(value)}</span>
+      <small id="live-lcd-detail">${esc(detail)} · generation ${lcd.generation}</small>
+    </div>
+  `;
+}
+
+function updateLiveTelemetryDom(): void {
+  const colors = liveRgbTelemetry?.colors ?? [];
+
+  document
+    .querySelectorAll<HTMLElement>("[data-live-led]")
+    .forEach((element) => {
+      const raw = element.dataset.liveLed;
+      if (!raw) return;
+      const index = Number(raw);
+      if (!Number.isInteger(index) || index < 0 || index >= colors.length) return;
+      element.style.setProperty("--live-led-color", colors[index]);
+    });
+
+  const source = document.querySelector<HTMLElement>("#live-rgb-source");
+  if (source) {
+    source.textContent = liveRgbTelemetry?.source ?? "OFFLINE";
+  }
+
+  const validity = document.querySelector<HTMLElement>("#live-rgb-validity");
+  if (validity) {
+    validity.textContent = liveRgbTelemetry?.frameValid === true
+      ? "Firmware frame"
+      : liveRgbTelemetry
+        ? "Native frame unavailable"
+        : "No telemetry";
+  }
+
+  const lcdMode = document.querySelector<HTMLElement>("#live-lcd-mode");
+  const lcdValue = document.querySelector<HTMLElement>("#live-lcd-value");
+  const lcdDetail = document.querySelector<HTMLElement>("#live-lcd-detail");
+
+  if (lcdMode && lcdValue && lcdDetail && liveLcdStatus) {
+    const lcd = liveLcdStatus;
+    lcdMode.textContent = lcd.mode;
+
+    if (lcd.mode === "VOLUME" || lcd.mode === "MUTE") {
+      lcdValue.textContent = `${lcd.percent ?? 0}%`;
+    } else if (lcd.mode === "FEEDBACK") {
+      lcdValue.textContent = `${lcd.kind ?? "FEEDBACK"} · ${lcd.value ?? "—"}`;
+    } else {
+      lcdValue.textContent = "Normal keyboard screen";
+    }
+
+    lcdDetail.textContent =
+      `${lcd.mode === "HOME" ? "HOME semantic state" : "Host-driven semantic state"} · generation ${lcd.generation}`;
+  }
+}
+
+async function refreshLiveTelemetry(): Promise<void> {
+  if (liveTelemetryBusy) return;
+  if (view !== "dashboard" && view !== "creator" && view !== "lcd") return;
+
+  liveTelemetryBusy = true;
+
+  try {
+    const [rgbResult, lcdResult] = await Promise.allSettled([
+      invoke<LiveRgbTelemetry>("get_live_rgb_telemetry"),
+      invoke<LcdLogicalStatus>("get_lcd_logical_status"),
+    ]);
+
+    liveRgbTelemetry =
+      rgbResult.status === "fulfilled" ? rgbResult.value : null;
+
+    if (lcdResult.status === "fulfilled") {
+      liveLcdStatus = lcdResult.value;
+    }
+
+    updateLiveTelemetryDom();
+  } finally {
+    liveTelemetryBusy = false;
+  }
+}
+
+function startLiveTelemetryLoop(): void {
+  if (liveTelemetryTimer !== null) return;
+
+  liveTelemetryTimer = window.setInterval(() => {
+    void refreshLiveTelemetry();
+  }, 300);
+
+  void refreshLiveTelemetry();
+}
+
 function renderDashboard(): string {
   const scanHz = status?.matrixScanHz
     ? `${status.matrixScanHz} Hz`
@@ -831,6 +1058,34 @@ function renderDashboard(): string {
           hardcoded into the frontend.
         </p>
       </article>
+
+      <article class="panel live-twin-panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">Physical telemetry</p>
+            <h2>Live AL80 RGB twin</h2>
+            <p class="muted">
+              Firmware-backed colors for Snake, Creator Scene, and the
+              low-battery safety frame. Native QMK base effects fail closed
+              instead of being simulated.
+            </p>
+          </div>
+          <div class="live-twin-status">
+            <span id="live-rgb-source">${esc(liveRgbTelemetry?.source ?? "OFFLINE")}</span>
+            <span id="live-rgb-validity">${
+              liveRgbTelemetry?.frameValid === true
+                ? "Firmware frame"
+                : liveRgbTelemetry
+                  ? "Native frame unavailable"
+                  : "No telemetry"
+            }</span>
+          </div>
+        </div>
+        <div class="live-twin-keyboard-wrap">
+          ${renderLiveKeyboardTwin()}
+        </div>
+      </article>
+
     </section>
   `;
 }
@@ -859,6 +1114,73 @@ function renderEffects(): string {
       </div>
     </section>
   `;
+}
+
+function syncCreatorViewport(recenter = true): void {
+  const stage = document.querySelector<HTMLElement>(".creator-board-stage");
+  const shell = document.querySelector<HTMLElement>(".creator-keyboard-shell");
+
+  if (!stage || !shell) return;
+
+  applyCreatorOrbitTransform();
+
+  if (creatorScaleMode === "actual") {
+    shell.style.removeProperty("--creator-auto-scale");
+
+    if (recenter) {
+      requestAnimationFrame(() => {
+        stage.scrollLeft = Math.max(
+          0,
+          (stage.scrollWidth - stage.clientWidth) / 2,
+        );
+        stage.scrollTop = Math.max(
+          0,
+          (stage.scrollHeight - stage.clientHeight) / 2,
+        );
+      });
+    }
+
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const style = getComputedStyle(stage);
+    const padX =
+      Number.parseFloat(style.paddingLeft) +
+      Number.parseFloat(style.paddingRight);
+    const padY =
+      Number.parseFloat(style.paddingTop) +
+      Number.parseFloat(style.paddingBottom);
+
+    const availableWidth = Math.max(1, stage.clientWidth - padX);
+    const availableHeight = Math.max(1, stage.clientHeight - padY);
+    const naturalWidth = Math.max(1, shell.offsetWidth);
+    const naturalHeight = Math.max(1, shell.offsetHeight);
+
+    const perspectiveReserve =
+      creatorViewMode === "studio3d" ? 0.90 : 0.97;
+
+    const scale = Math.min(
+      1,
+      (availableWidth / naturalWidth) * perspectiveReserve,
+      (availableHeight / naturalHeight) * perspectiveReserve,
+    );
+
+    shell.style.setProperty(
+      "--creator-auto-scale",
+      scale.toFixed(4),
+    );
+
+    if (recenter) {
+      stage.scrollLeft = 0;
+      stage.scrollTop = 0;
+    }
+  });
+}
+
+function scheduleCreatorViewportSync(recenter = true): void {
+  syncCreatorViewport(recenter);
+  requestAnimationFrame(() => syncCreatorViewport(false));
 }
 
 function renderCreator(): string {
@@ -1081,10 +1403,128 @@ function renderCreator(): string {
         </p>
       </article>
 
-    <div class="page-heading"><div><p class="eyebrow">Per-key RGB Creator</p><h1>Keyboard Painter</h1><p>Paint any of the 79 key LEDs and 3 accent LEDs. Upload is atomic through the physically validated 0x4A protocol and remains RAM-only.</p></div>${badge(supported ? "Creator Protocol Ready" : "Creator unavailable", supported ? "good" : "warn")}</div>
-    <article class="panel creator-toolbar"><label class="creator-color-control"><span>Color</span><input id="creator-color" type="color" value="${esc(creatorPaintColor)}"/><code>${esc(creatorPaintColor)}</code></label><div class="creator-tool-group"><button class="secondary-btn creator-tool ${creatorTool === "paint" ? "tool-active" : ""}" data-creator-tool="paint" type="button">Paint</button><button class="secondary-btn creator-tool ${creatorTool === "select" ? "tool-active" : ""}" data-creator-tool="select" type="button">Select</button><button id="creator-apply-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Color selected (${creatorSelected.size})</button><button id="creator-clear-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Clear selection</button></div></article>
-    <article class="panel"><div class="creator-actions"><button id="creator-wasd-demo" class="secondary-btn" type="button">WASD demo</button><button id="creator-fill" class="secondary-btn" type="button">Fill all</button><button id="creator-black" class="secondary-btn" type="button">All off</button><button id="creator-white" class="secondary-btn" type="button">All white</button><button id="creator-undo" class="secondary-btn" type="button" ${creatorHistory.length === 0 ? "disabled" : ""}>Undo</button><button id="creator-save" class="secondary-btn" type="button">Save scene</button><button id="creator-apply" class="primary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Apply to keyboard</button><button id="creator-disable" class="secondary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Exit Creator</button></div></article>
-    <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Exact recovered layout</p><h2>79 RGB keys</h2></div>${badge("Click or drag to paint")}</div><div class="creator-board">${keys}${controls}</div></article>
+    <div class="page-heading creator-premium-heading"><div><p class="eyebrow">AL80 Creator Studio</p><h1>Design your keyboard</h1><p>Create lighting visually, refine every key, save your work locally, then apply only when you choose. The validated 82-LED scene remains volatile RAM.</p></div><div class="creator-heading-status">${badge("Local canvas", "neutral")}${badge(supported ? "Keyboard ready" : "Keyboard unavailable", supported ? "good" : "warn")}</div></div>
+    <article class="panel creator-live-mirror">
+      <div class="creator-live-mirror-copy">
+        <div class="creator-live-title-row">
+          <div>
+            <p class="eyebrow">Digital Twin · Live Known State</p>
+            <h2>${creatorMirrorExact && capabilities?.creatorSceneState === true ? "Exact Studio-applied scene" : "Host-known device state"}</h2>
+          </div>
+          ${badge(creatorMirrorExact && capabilities?.creatorSceneState === true ? "Exact scene mirror" : "No per-key readback", creatorMirrorExact && capabilities?.creatorSceneState === true ? "good" : "neutral")}
+        </div>
+        <p class="muted">
+          The protocol exposes live feature state, but not arbitrary physical per-key RGB readback.
+          After this Studio successfully applies the current Creator frame, the canvas is an exact
+          session mirror until you edit it again. Otherwise the state rail below is authoritative.
+        </p>
+      </div>
+      <div class="creator-live-state-grid">
+        <div class="creator-live-state ${capabilities?.rgbState === true ? "is-live" : ""}"><span>RGB CORE</span><strong>${capabilities?.rgbState === true ? "ON" : capabilities?.rgbState === false ? "OFF" : "UNKNOWN"}</strong></div>
+        <div class="creator-live-state ${capabilities?.overlayState === true ? "is-live" : ""}"><span>SNAKE / OVERLAY</span><strong>${capabilities?.overlayState === true ? "ON" : capabilities?.overlayState === false ? "OFF" : "UNKNOWN"}</strong></div>
+        <div class="creator-live-state ${capabilities?.creatorSceneState === true ? "is-live" : ""}"><span>CREATOR SCENE</span><strong>${capabilities?.creatorSceneState === true ? "ON" : capabilities?.creatorSceneState === false ? "OFF" : "UNKNOWN"}</strong></div>
+        <div class="creator-live-state ${capabilities?.inputRouterState === true ? "is-live" : ""}"><span>INPUT ROUTER</span><strong>${capabilities?.inputRouterState === true ? "ON" : capabilities?.inputRouterState === false ? "OFF" : "UNKNOWN"}</strong></div>
+        <div class="creator-live-state ${capabilities?.lcdOsd === true ? "is-ready" : ""}"><span>LCD TRANSPORT</span><strong>${capabilities?.lcdOsd === true ? "READY" : "UNAVAILABLE"}</strong></div>
+        <div class="creator-live-state ${capabilities?.lcdFeedback === true && capabilities?.inputEventAutoLcd === true ? "is-ready" : ""}"><span>AUTO LCD</span><strong>${capabilities?.lcdFeedback === true && capabilities?.inputEventAutoLcd === true ? "READY" : "LIMITED"}</strong></div>
+      </div>
+    </article>
+
+    <div class="creator-flow-strip" aria-label="Creator workflow">
+      <div class="creator-flow-step active"><span>1</span><div><strong>Create</strong><small>Paint or generate</small></div></div>
+      <div class="creator-flow-line"></div>
+      <div class="creator-flow-step"><span>2</span><div><strong>Refine</strong><small>Select and edit</small></div></div>
+      <div class="creator-flow-line"></div>
+      <div class="creator-flow-step"><span>3</span><div><strong>Save</strong><small>Keep it on this PC</small></div></div>
+      <div class="creator-flow-line"></div>
+      <div class="creator-flow-step device-step"><span>4</span><div><strong>Apply</strong><small>Explicit keyboard action</small></div></div>
+    </div>
+    <article class="panel creator-toolbar creator-command-center">
+      <div class="creator-command-block color-block">
+        <span class="creator-command-label">Paint color</span>
+        <label class="creator-color-control creator-premium-color">
+          <input id="creator-color" type="color" value="${esc(creatorPaintColor)}"/>
+          <span class="creator-color-swatch-copy"><strong>Current color</strong><code>${esc(creatorPaintColor)}</code></span>
+        </label>
+      </div>
+      <div class="creator-command-divider"></div>
+      <div class="creator-command-block">
+        <span class="creator-command-label">Tool</span>
+        <div class="creator-segmented-control">
+          <button class="secondary-btn creator-tool ${creatorTool === "paint" ? "tool-active" : ""}" data-creator-tool="paint" type="button"><span class="tool-glyph">✦</span>Paint</button>
+          <button class="secondary-btn creator-tool ${creatorTool === "select" ? "tool-active" : ""}" data-creator-tool="select" type="button"><span class="tool-glyph">◇</span>Select</button>
+        </div>
+      </div>
+      <div class="creator-command-divider"></div>
+      <div class="creator-command-block creator-selection-block">
+        <span class="creator-command-label">Selection</span>
+        <div class="creator-tool-group">
+          <button id="creator-apply-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Color ${creatorSelected.size || "selected"}</button>
+          <button id="creator-clear-selection" class="secondary-btn" type="button" ${creatorSelected.size === 0 ? "disabled" : ""}>Clear</button>
+        </div>
+      </div>
+    </article>
+    <article class="panel creator-action-dock">
+      <div class="creator-action-group">
+        <span class="creator-command-label">Quick canvas</span>
+        <div class="creator-actions">
+          <button id="creator-wasd-demo" class="secondary-btn" type="button">WASD preset</button>
+          <button id="creator-fill" class="secondary-btn" type="button">Fill</button>
+          <button id="creator-black" class="secondary-btn" type="button">Lights off</button>
+          <button id="creator-white" class="secondary-btn" type="button">White</button>
+          <button id="creator-undo" class="secondary-btn" type="button" ${creatorHistory.length === 0 ? "disabled" : ""}>Undo</button>
+        </div>
+      </div>
+      <div class="creator-action-separator"></div>
+      <div class="creator-action-group save-group">
+        <span class="creator-command-label">Local</span>
+        <button id="creator-save" class="secondary-btn creator-save-premium" type="button">Save scene</button>
+      </div>
+      <div class="creator-action-separator"></div>
+      <div class="creator-action-group device-actions">
+        <span class="creator-command-label">Keyboard</span>
+        <div class="creator-actions">
+          <button id="creator-disable" class="secondary-btn" type="button" ${!supported || busy ? "disabled" : ""}>Return to normal RGB</button>
+          <button id="creator-apply" class="primary-btn creator-apply-premium" type="button" ${!supported || busy ? "disabled" : ""}>Apply to keyboard</button>
+        </div>
+      </div>
+    </article>
+    <article class="panel creator-studio-board-panel">
+      <div class="panel-title-row creator-board-title">
+        <div>
+          <p class="eyebrow">AL80 Digital Twin</p>
+          <h2>Keyboard canvas</h2>
+          <p class="muted">The same exact recovered key map, presented as a tactile editing surface.</p>
+        </div>
+        <div class="creator-board-header-actions">
+          ${badge("79 RGB keys")}
+          ${badge("3 accents")}
+          <div class="creator-camera-controls">
+            <div class="creator-view-switch" aria-label="Keyboard view">
+              <button id="creator-view-top" class="secondary-btn ${creatorViewMode === "top" ? "view-active" : ""}" type="button">Top</button>
+              <button id="creator-view-3d" class="secondary-btn ${creatorViewMode === "studio3d" ? "view-active" : ""}" type="button">3D</button>
+            </div>
+            <div class="creator-view-switch creator-scale-switch" aria-label="Keyboard scale">
+              <button id="creator-scale-fit" class="secondary-btn ${creatorScaleMode === "fit" ? "view-active" : ""}" type="button">Fit</button>
+              <button id="creator-scale-100" class="secondary-btn ${creatorScaleMode === "actual" ? "view-active" : ""}" type="button">100%</button>
+            </div>
+            <button id="creator-recenter" class="secondary-btn creator-recenter-btn" type="button">Re-center</button>
+          </div>
+        </div>
+      </div>
+      <div class="creator-board-stage ${creatorViewMode} ${creatorScaleMode}">
+        <div class="creator-board-ambient"></div>
+        <div class="creator-keyboard-shell">
+          <div class="creator-keyboard-lip"></div>
+          <div class="creator-board">${keys}${controls}</div>
+        </div>
+      </div>
+      <div class="creator-board-foot">
+        <span>Click or drag to paint</span>
+        <span>Fit keeps all 82 LEDs visible</span>
+        <span>100% shows native canvas scale</span>
+        <span>3D is visual only — LED addressing never changes</span>
+      </div>
+    </article>
     <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Decorative zones</p><h2>Accent LEDs</h2></div>${badge("LED 76 / 77 / 78")}</div><div class="creator-accent-row">${accents}</div></article>
     <article class="panel"><div class="panel-title-row"><div><p class="eyebrow">Local library</p><h2>Saved scenes</h2></div>${badge(`${savedCreatorScenes.length} saved`)}</div><div class="creator-scene-library">${saved}</div></article>
     <article class="panel"><p class="muted">Creator Scene temporarily takes priority over Snake. Exit Creator to return to Snake/normal RGB. Low-battery red indication remains highest priority.</p></article>
@@ -1150,7 +1590,7 @@ function renderLcd(): string {
       <div class="page-heading">
         <div>
           <p class="eyebrow">Display</p>
-          <h1>LCD</h1>
+          <h1>Display Studio</h1>
           <p>
             Safe volatile previews for the validated display protocol.
           </p>
@@ -1161,6 +1601,144 @@ function renderLcd(): string {
         )}
       </div>
 
+      <article class="panel lcd-studio-hero">
+        <div class="lcd-studio-device">
+          <div class="lcd-device-crown">
+            <span>AL80</span>
+            <span>96 × 160</span>
+          </div>
+          <div class="lcd-device-screen">
+            <div class="lcd-screen-glow"></div>
+            <div class="lcd-screen-content">
+              <span class="lcd-screen-kicker">DISPLAY STUDIO</span>
+              <strong>AL80</strong>
+              <span>Validated feedback. Visible boundaries.</span>
+            </div>
+          </div>
+          <div class="lcd-device-footer">
+            <span>VOLATILE PREVIEW</span>
+            <span>RGB565</span>
+          </div>
+        </div>
+
+        <div class="lcd-studio-copy">
+          <p class="eyebrow">Screen Composer</p>
+          <h2>Everything shown here says exactly what works today</h2>
+          <p class="muted">
+            AL80 Studio separates physically validated LCD feedback from future
+            framebuffer work. Nothing marked experimental is presented as a working
+            device feature.
+          </p>
+
+          <div class="lcd-live-strip" aria-label="Display capability status">
+            ${badge(capabilities?.lcdOsd ? "Display transport ready" : "Display unavailable", capabilities?.lcdOsd ? "good" : "warn")}
+            ${badge(capabilities?.lcdFeedback ? "Typed feedback validated" : "Typed feedback unavailable", capabilities?.lcdFeedback ? "good" : "warn")}
+            ${badge(capabilities?.inputEventAutoLcd ? "Auto LCD path ready" : "Auto LCD unavailable", capabilities?.inputEventAutoLcd ? "good" : "warn")}
+            ${badge("Volatile only", "neutral")}
+          </div>
+
+          <section class="lcd-capability-section ready-now">
+            <div class="lcd-capability-heading">
+              <div>
+                <span class="lcd-capability-kicker">AVAILABLE NOW</span>
+                <h3>Validated on the real AL80</h3>
+              </div>
+              ${badge("Ready now", "good")}
+            </div>
+
+            <div class="lcd-template-grid">
+              <div class="lcd-template-card validated">
+                <span class="lcd-template-icon">◒</span>
+                <div><strong>Volume</strong><small>0–100% OSD</small></div>
+                <span class="template-state ready">Validated</span>
+              </div>
+              <div class="lcd-template-card validated">
+                <span class="lcd-template-icon">◐</span>
+                <div><strong>Mute</strong><small>Actual host audio state</small></div>
+                <span class="template-state ready">Validated</span>
+              </div>
+              <div class="lcd-template-card validated">
+                <span class="lcd-template-icon">◎</span>
+                <div><strong>Action</strong><small>Typed generic feedback</small></div>
+                <span class="template-state ready">Validated</span>
+              </div>
+              <div class="lcd-template-card validated">
+                <span class="lcd-template-icon">◇</span>
+                <div><strong>Profile / Scene</strong><small>Typed state feedback</small></div>
+                <span class="template-state ready">Validated</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="lcd-capability-section future-track">
+            <div class="lcd-capability-heading">
+              <div>
+                <span class="lcd-capability-kicker">FUTURE / EXPERIMENTAL</span>
+                <h3>Requires additional protocol work</h3>
+              </div>
+              ${badge("Not active", "neutral")}
+            </div>
+
+            <div class="lcd-template-grid lcd-future-grid">
+              <div class="lcd-template-card future">
+                <span class="lcd-template-icon">▧</span>
+                <div>
+                  <strong>Artwork</strong>
+                  <small>Needs a dedicated arbitrary framebuffer API</small>
+                </div>
+                <span class="template-state future">Protocol work</span>
+              </div>
+              <div class="lcd-template-card future">
+                <span class="lcd-template-icon">▶</span>
+                <div>
+                  <strong>Animation</strong>
+                  <small>Needs validated frame scheduling / streaming</small>
+                </div>
+                <span class="template-state future">Protocol work</span>
+              </div>
+            </div>
+
+      <article class="panel live-lcd-panel">
+        <div class="panel-title-row">
+          <div>
+            <p class="eyebrow">Current host-driven state</p>
+            <h2>Live LCD semantic mirror</h2>
+            <p class="muted">
+              Mirrors the last successfully host-driven HOME, Volume/Mute,
+              or typed feedback state. This is semantic telemetry, not a
+              fabricated pixel screenshot of arbitrary LCD firmware content.
+            </p>
+          </div>
+          ${badge("Logical status")}
+        </div>
+        <div class="live-lcd-device">
+          ${renderLiveLcdMirror()}
+        </div>
+      </article>
+
+    </section>
+
+          <div class="lcd-truth-rail">
+            <div>
+              <span class="lcd-truth-index">01</span>
+              <div><strong>Works now</strong><small>Volume, mute and typed feedback use the validated volatile LCD path.</small></div>
+            </div>
+            <div>
+              <span class="lcd-truth-index">02</span>
+              <div><strong>No fake persistence</strong><small>This Studio does not claim persistent display writes.</small></div>
+            </div>
+            <div>
+              <span class="lcd-truth-index">03</span>
+              <div><strong>Future stays visible</strong><small>Artwork and animation remain roadmap capabilities until their protocol is proven.</small></div>
+            </div>
+          </div>
+
+          <div class="lcd-studio-note">
+            <span class="lcd-note-dot"></span>
+            The controls below are the actual validated hardware previews.
+          </div>
+        </div>
+      </article>
       <article class="panel">
         <div class="panel-title-row">
           <div>
@@ -1529,6 +2107,21 @@ function renderPage(): string {
 
 function render(): void {
   const connected = status?.connected === true;
+  const previousWorkspace =
+    app.querySelector<HTMLElement>(".workspace");
+  const previousCreatorStage =
+    app.querySelector<HTMLElement>(".creator-board-stage");
+
+  const preserveSameView = lastRenderedView === view;
+  const workspaceScrollTop =
+    preserveSameView ? previousWorkspace?.scrollTop ?? 0 : 0;
+  const creatorStageScroll =
+    preserveSameView && view === "creator" && previousCreatorStage
+      ? {
+          left: previousCreatorStage.scrollLeft,
+          top: previousCreatorStage.scrollTop,
+        }
+      : null;
 
   app.innerHTML = `
     <div class="studio-shell">
@@ -1576,6 +2169,29 @@ function render(): void {
   `;
 
   bindEvents();
+  lastRenderedView = view;
+  startLiveTelemetryLoop();
+
+  requestAnimationFrame(() => {
+    const workspace = app.querySelector<HTMLElement>(".workspace");
+    if (workspace && preserveSameView) {
+      workspace.scrollTop = workspaceScrollTop;
+    }
+
+    if (creatorStageScroll) {
+      requestAnimationFrame(() => {
+        const stage =
+          app.querySelector<HTMLElement>(".creator-board-stage");
+        if (stage) {
+          stage.scrollLeft = creatorStageScroll.left;
+          stage.scrollTop = creatorStageScroll.top;
+        }
+      });
+    }
+
+    applyCreatorOrbitTransform();
+    updateLiveTelemetryDom();
+  });
 }
 
 async function refresh(message = ""): Promise<void> {
@@ -1610,6 +2226,7 @@ async function refresh(message = ""): Promise<void> {
   }
 
   render();
+  void refreshLiveTelemetry();
 }
 
 async function action(
@@ -1670,6 +2287,138 @@ function bindEvents(): void {
       render();
     },
   });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-view-top")
+    ?.addEventListener("click", () => {
+      creatorViewMode = "top";
+      render();
+      scheduleCreatorViewportSync();
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-view-3d")
+    ?.addEventListener("click", () => {
+      creatorViewMode = "studio3d";
+      render();
+      scheduleCreatorViewportSync();
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-scale-fit")
+    ?.addEventListener("click", () => {
+      creatorScaleMode = "fit";
+      render();
+      scheduleCreatorViewportSync();
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-scale-100")
+    ?.addEventListener("click", () => {
+      creatorScaleMode = "actual";
+      render();
+      scheduleCreatorViewportSync();
+    });
+
+  document
+    .querySelector<HTMLButtonElement>("#creator-recenter")
+    ?.addEventListener("click", () => {
+      creatorOrbitX = 9;
+      creatorOrbitY = -1.8;
+      creatorOrbitZoom = 1;
+      applyCreatorOrbitTransform();
+      syncCreatorViewport(true);
+    });
+
+  const creatorStage =
+    document.querySelector<HTMLElement>(".creator-board-stage");
+
+  creatorStage?.addEventListener("pointerdown", (event) => {
+    if (creatorViewMode !== "studio3d" || event.button !== 0) return;
+
+    const target = event.target as Element | null;
+    if (
+      target?.closest(
+        "[data-creator-led],button,input,select,textarea,label,a",
+      )
+    ) {
+      return;
+    }
+
+    creatorOrbitDragging = true;
+    creatorOrbitPointerId = event.pointerId;
+    creatorOrbitLastX = event.clientX;
+    creatorOrbitLastY = event.clientY;
+    creatorStage.setPointerCapture(event.pointerId);
+    creatorStage.classList.add("orbit-dragging");
+    event.preventDefault();
+  });
+
+  creatorStage?.addEventListener("pointermove", (event) => {
+    if (
+      !creatorOrbitDragging ||
+      creatorOrbitPointerId !== event.pointerId
+    ) {
+      return;
+    }
+
+    const dx = event.clientX - creatorOrbitLastX;
+    const dy = event.clientY - creatorOrbitLastY;
+
+    creatorOrbitLastX = event.clientX;
+    creatorOrbitLastY = event.clientY;
+
+    creatorOrbitY = creatorOrbitClamp(
+      creatorOrbitY + dx * 0.22,
+      -55,
+      55,
+    );
+    creatorOrbitX = creatorOrbitClamp(
+      creatorOrbitX - dy * 0.18,
+      -8,
+      55,
+    );
+
+    applyCreatorOrbitTransform();
+  });
+
+  const finishCreatorOrbit = (event: PointerEvent) => {
+    if (creatorOrbitPointerId !== event.pointerId) return;
+
+    creatorOrbitDragging = false;
+    creatorOrbitPointerId = null;
+    creatorStage?.classList.remove("orbit-dragging");
+
+    if (creatorStage?.hasPointerCapture(event.pointerId)) {
+      creatorStage.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  creatorStage?.addEventListener("pointerup", finishCreatorOrbit);
+  creatorStage?.addEventListener("pointercancel", finishCreatorOrbit);
+
+  creatorStage?.addEventListener(
+    "wheel",
+    (event) => {
+      if (creatorViewMode !== "studio3d") return;
+
+      creatorOrbitZoom = creatorOrbitClamp(
+        creatorOrbitZoom + (event.deltaY < 0 ? 0.06 : -0.06),
+        0.72,
+        1.30,
+      );
+
+      applyCreatorOrbitTransform();
+      event.preventDefault();
+    },
+    { passive: false },
+  );
+
+  /*
+   * Safe on every page: the helper returns immediately when the
+   * Creator viewport is not mounted.
+   */
+  scheduleCreatorViewportSync(false);
 
   document
     .querySelector<HTMLSelectElement>("#creator-effect-kind")
@@ -1942,6 +2691,7 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#creator-apply")?.addEventListener("click", () => {
     void action(async () => {
       await invoke<string>("apply_creator_scene", { colors: creatorColors });
+      creatorMirrorExact = true;
     }, "Creator Scene applied to keyboard.");
   });
 

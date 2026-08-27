@@ -1,4 +1,4 @@
-use al80_core::auto_lcd_feedback::{AutoLcdPolicy, auto_lcd_policy};
+use al80_core::auto_lcd_feedback::{auto_lcd_policy, AutoLcdPolicy};
 use al80_core::lcd_feedback::LcdFeedback;
 use std::env;
 use std::fs;
@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,116 @@ const GENERIC_LCD_IDLE: Duration = Duration::from_millis(2200);
  * A delayed generic-HOME must not overwrite a newer Volume/MUTE OSD.
  */
 static LCD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/*
+ * LCD_LOGICAL_STATUS_V1
+ *
+ * Mirrors the last successfully host-driven LCD semantic state.
+ * This is not pixel readback from arbitrary LCD firmware content.
+ */
+#[derive(Debug, Clone)]
+struct LcdLogicalState {
+    mode: String,
+    generation: u64,
+    percent: Option<u8>,
+    muted: bool,
+    kind: Option<String>,
+    value: Option<String>,
+}
+
+static LCD_LOGICAL_STATE: std::sync::OnceLock<std::sync::Mutex<LcdLogicalState>> =
+    std::sync::OnceLock::new();
+
+fn lcd_logical_state() -> &'static std::sync::Mutex<LcdLogicalState> {
+    LCD_LOGICAL_STATE.get_or_init(|| {
+        std::sync::Mutex::new(LcdLogicalState {
+            mode: "HOME".to_string(),
+            generation: 0,
+            percent: None,
+            muted: false,
+            kind: None,
+            value: None,
+        })
+    })
+}
+
+fn lcd_record_home(generation: u64) {
+    if let Ok(mut state) = lcd_logical_state().lock() {
+        state.mode = "HOME".to_string();
+        state.generation = generation;
+        state.percent = None;
+        state.muted = false;
+        state.kind = None;
+        state.value = None;
+    }
+}
+
+fn lcd_record_volume(generation: u64, volume: VolumeState) {
+    if let Ok(mut state) = lcd_logical_state().lock() {
+        state.mode = if volume.muted {
+            "MUTE".to_string()
+        } else {
+            "VOLUME".to_string()
+        };
+        state.generation = generation;
+        state.percent = Some(volume.percent);
+        state.muted = volume.muted;
+        state.kind = None;
+        state.value = None;
+    }
+}
+
+fn lcd_record_feedback(generation: u64, kind: &str, value: &str) {
+    if let Ok(mut state) = lcd_logical_state().lock() {
+        state.mode = "FEEDBACK".to_string();
+        state.generation = generation;
+        state.percent = None;
+        state.muted = false;
+        state.kind = Some(kind.to_string());
+        state.value = Some(value.to_string());
+    }
+}
+
+fn lcd_status_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn lcd_status_line() -> Result<String, String> {
+    let state = lcd_logical_state()
+        .lock()
+        .map_err(|_| "LCD logical state mutex poisoned".to_string())?
+        .clone();
+
+    Ok(format!(
+        "OK lcd=STATUS mode={} generation={} percent={} muted={} kind={} value={}",
+        state.mode,
+        state.generation,
+        state
+            .percent
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        if state.muted { "YES" } else { "NO" },
+        state
+            .kind
+            .as_deref()
+            .map(lcd_status_token)
+            .unwrap_or_else(|| "-".to_string()),
+        state
+            .value
+            .as_deref()
+            .map(lcd_status_token)
+            .unwrap_or_else(|| "-".to_string()),
+    ))
+}
 
 const INPUT_EVENT_POLL: Duration = Duration::from_millis(5);
 const INPUT_EVENT_NONE: u64 = u64::MAX;
@@ -209,7 +319,12 @@ fn read_volume() -> Result<VolumeState, String> {
 
 fn lcd_home_direct(shared: &SharedDevice) -> Result<(), String> {
     let mut owner = lock_device(shared)?;
-    owner.operation(|device| device.lcd_home())
+    owner.operation(|device| device.lcd_home())?;
+
+    let generation = LCD_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    lcd_record_home(generation);
+
+    Ok(())
 }
 
 fn lcd_home(shared: &SharedDevice) -> Result<(), String> {
@@ -225,6 +340,7 @@ fn lcd_home_if_generation(shared: &SharedDevice, generation: u64) -> Result<bool
     }
 
     owner.operation(|device| device.lcd_home())?;
+    lcd_record_home(generation);
 
     Ok(true)
 }
@@ -244,6 +360,7 @@ fn lcd_volume_with_generation(
     let mut owner = lock_device(shared)?;
 
     let ack = owner.operation(|device| device.lcd_volume_osd(state.percent, state.muted))?;
+    lcd_record_volume(generation, state);
 
     Ok((ack, generation))
 }
@@ -516,6 +633,50 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
             ))
         }
 
+        ["TELEMETRY", "RGB"] => {
+            let mut owner = lock_device(shared)?;
+
+            let live = owner.operation(|device| device.live_rgb_telemetry())?;
+
+            let source = match live.source {
+                1 => "SNAKE",
+                2 => "CREATOR",
+                3 => "LOW_BATTERY",
+                _ => "NATIVE_UNKNOWN",
+            };
+
+            let mut frame = String::with_capacity(live.colors.len() * 6);
+
+            for color in &live.colors {
+                use std::fmt::Write as _;
+                let _ = write!(
+                    &mut frame,
+                    "{:02x}{:02x}{:02x}",
+                    color[0], color[1], color[2]
+                );
+            }
+
+            Ok(format!(
+                concat!(
+                    "OK telemetry=RGB version={} source={} ",
+                    "frame_valid={} rgb={} overlay={} creator={} ",
+                    "leds={} frame={}"
+                ),
+                live.version,
+                source,
+                if live.frame_valid { "YES" } else { "NO" },
+                if live.rgb_core_enabled { "ON" } else { "OFF" },
+                if live.overlay_enabled { "ON" } else { "OFF" },
+                if live.creator_scene_enabled {
+                    "ON"
+                } else {
+                    "OFF"
+                },
+                live.colors.len(),
+                frame,
+            ))
+        }
+
         ["INPUT", "EVENTS"] => input_events_status_line(shared),
 
         ["INPUT", "STATUS"] => {
@@ -648,6 +809,8 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
             ))
         }
 
+        ["LCD", "STATUS"] => lcd_status_line(),
+
         ["LCD", "FEEDBACK", kind, value] => {
             let feedback = LcdFeedback::parse(kind, value)?;
 
@@ -658,6 +821,7 @@ fn handle_request(request: &str, shared: &SharedDevice) -> Result<String, String
             let generation = lcd_generation_bump();
 
             let transfer = lcd_generic_feedback(shared, &feedback)?;
+            lcd_record_feedback(generation, &kind_out, &value_out);
 
             let delayed_shared = Arc::clone(shared);
 
@@ -979,6 +1143,7 @@ fn start_auto_lcd_worker(
                         transfer.elapsed_ms,
                     );
 
+                    lcd_record_feedback(generation, &kind, &value);
                     schedule_auto_lcd_home(&shared, generation);
                 }
 

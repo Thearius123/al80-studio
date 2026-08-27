@@ -1,0 +1,3 @@
+# YUNZII AL80 normal USB device observed during AL80 Studio development.
+# Review before installing.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="28e9", ATTRS{idProduct}=="30af", TAG+="uaccess"

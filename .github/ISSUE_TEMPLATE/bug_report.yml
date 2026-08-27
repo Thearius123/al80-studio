@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible AL80 Studio problem
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets or unrelated personal device information.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS / distribution
+      placeholder: Fedora, Arch, Ubuntu...
+  - type: textarea
+    id: status
+    attributes:
+      label: al80ctl status / capabilities
+      description: Remove anything you consider private.
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: dropdown
+    id: firmware
+    attributes:
+      label: Did this involve firmware flashing?
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true

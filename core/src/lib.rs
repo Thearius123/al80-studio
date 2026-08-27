@@ -191,6 +191,22 @@ pub struct InputRouterStatus {
     pub fallback_supported: bool,
 }
 
+pub const LIVE_RGB_LED_COUNT: usize = 82;
+const LIVE_RGB_TELEMETRY_COMMAND: u8 = 0x4D;
+const LIVE_RGB_TELEMETRY_VERSION: u8 = 1;
+const LIVE_RGB_TELEMETRY_CHUNK: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveRgbTelemetry {
+    pub version: u8,
+    pub source: u8,
+    pub frame_valid: bool,
+    pub rgb_core_enabled: bool,
+    pub overlay_enabled: bool,
+    pub creator_scene_enabled: bool,
+    pub colors: Vec<[u8; 3]>,
+}
+
 pub struct Al80 {
     session: raw_hid_session::RawHidSession,
     info: DeviceInfo,
@@ -604,6 +620,115 @@ impl Al80 {
         }
 
         Ok(normalized.to_vec())
+    }
+
+    /// Read the firmware-authored live RGB shadow frame.
+    ///
+    /// This query is valid only while the AL80-specific overlay,
+    /// Creator Scene, or low-battery safety frame is authoritative.
+    pub fn live_rgb_telemetry(&mut self) -> Result<LiveRgbTelemetry, String> {
+        let mut colors = vec![[0u8; 3]; LIVE_RGB_LED_COUNT];
+        let mut first_meta: Option<(u8, u8, bool, bool, bool, bool)> = None;
+        let mut coherent = true;
+        let mut start = 0usize;
+
+        while start < LIVE_RGB_LED_COUNT {
+            let mut payload = [0u8; REPORT_BYTES];
+            payload[0] = LIVE_RGB_TELEMETRY_COMMAND;
+            payload[1] = start as u8;
+
+            let (response, _) = self.transact_raw32(&payload, Duration::from_millis(500))?;
+
+            let normalized: &[u8] = if response.len() >= LINUX_WRITE_BYTES && response[0] == 0 {
+                &response[1..usize::min(LINUX_WRITE_BYTES, response.len())]
+            } else {
+                &response[0..usize::min(REPORT_BYTES, response.len())]
+            };
+
+            if normalized.len() < 7 {
+                return Err("0x4D telemetry response too short".to_string());
+            }
+
+            if normalized[0] != LIVE_RGB_TELEMETRY_COMMAND {
+                return Err(format!(
+                    "unexpected live RGB telemetry command 0x{:02X}",
+                    normalized[0]
+                ));
+            }
+
+            if normalized[1] != STATUS_OK {
+                return Err(format!(
+                    "0x4D telemetry returned status 0x{:02X}",
+                    normalized[1]
+                ));
+            }
+
+            if normalized[2] != LIVE_RGB_TELEMETRY_VERSION {
+                return Err(format!(
+                    "unsupported live RGB telemetry version {}",
+                    normalized[2]
+                ));
+            }
+
+            if normalized[3] as usize != start {
+                return Err(format!(
+                    "0x4D telemetry start mismatch: expected {}, got {}",
+                    start, normalized[3]
+                ));
+            }
+
+            let count = normalized[4] as usize;
+
+            if count == 0
+                || count > LIVE_RGB_TELEMETRY_CHUNK
+                || start + count > LIVE_RGB_LED_COUNT
+                || normalized.len() < 7 + count * 3
+            {
+                return Err(format!(
+                    "invalid 0x4D telemetry chunk start={} count={}",
+                    start, count
+                ));
+            }
+
+            let flags = normalized[5];
+            let source = normalized[6];
+            let meta = (
+                normalized[2],
+                source,
+                (flags & 0x01) != 0,
+                (flags & 0x02) != 0,
+                (flags & 0x04) != 0,
+                (flags & 0x10) != 0,
+            );
+
+            if let Some(first) = first_meta {
+                if first != meta {
+                    coherent = false;
+                }
+            } else {
+                first_meta = Some(meta);
+            }
+
+            for index in 0..count {
+                let src = 7 + index * 3;
+                colors[start + index] = [normalized[src], normalized[src + 1], normalized[src + 2]];
+            }
+
+            start += count;
+        }
+
+        let (version, source, rgb, overlay, creator, valid) =
+            first_meta.ok_or_else(|| "live RGB telemetry returned no metadata".to_string())?;
+
+        Ok(LiveRgbTelemetry {
+            version,
+            source,
+            frame_valid: valid && coherent,
+            rgb_core_enabled: rgb,
+            overlay_enabled: overlay,
+            creator_scene_enabled: creator,
+            colors,
+        })
     }
 
     pub fn creator_scene_status(&mut self) -> Result<CreatorSceneStatus, String> {

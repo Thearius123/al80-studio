@@ -59,6 +59,8 @@ fn help() {
     println!("  al80ctl ping");
     println!("  al80ctl status");
     println!("  al80ctl capabilities");
+    println!("  al80ctl telemetry rgb");
+    println!("  al80ctl lcd status");
     println!("  al80ctl audio");
     println!("  al80ctl rgb on|off");
     println!("  al80ctl overlay status|on|off");
@@ -122,6 +124,8 @@ fn build_command(args: &[String]) -> Result<String, String> {
             Ok(format!("INPUT APPLY {raw}"))
         }
 
+        [group, state] if group == "telemetry" && state == "rgb" => Ok("TELEMETRY RGB".to_string()),
+        [group, state] if group == "lcd" && state == "status" => Ok("LCD STATUS".to_string()),
         [group, state] if group == "scene" && state == "status" => Ok("SCENE STATUS".to_string()),
 
         [group, state] if group == "scene" && state == "off" => Ok("SCENE OFF".to_string()),

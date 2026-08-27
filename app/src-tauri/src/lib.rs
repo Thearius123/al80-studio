@@ -111,6 +111,29 @@ impl Capabilities {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveRgbTelemetry {
+    version: u8,
+    source: String,
+    frame_valid: bool,
+    rgb_core_enabled: bool,
+    overlay_enabled: bool,
+    creator_scene_enabled: bool,
+    colors: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LcdLogicalStatus {
+    mode: String,
+    generation: u64,
+    percent: Option<u8>,
+    muted: bool,
+    kind: Option<String>,
+    value: Option<String>,
+}
+
 fn socket_path() -> PathBuf {
     if let Ok(runtime) = env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime).join("al80d.sock");
@@ -196,6 +219,99 @@ fn parse_yes_no(value: Option<&str>, name: &str) -> Result<bool, String> {
         Some(other) => Err(format!("invalid al80d {name} value: {other}")),
         None => Err(format!("missing al80d {name} value")),
     }
+}
+
+fn parse_live_rgb_telemetry(response: &str) -> Result<LiveRgbTelemetry, String> {
+    let fields = parse_fields(response);
+
+    if field(&fields, "telemetry") != Some("RGB") {
+        return Err("al80d did not return RGB telemetry".to_string());
+    }
+
+    let version = field(&fields, "version")
+        .ok_or_else(|| "missing live RGB version".to_string())?
+        .parse::<u8>()
+        .map_err(|error| format!("invalid live RGB version: {error}"))?;
+
+    let leds = field(&fields, "leds")
+        .ok_or_else(|| "missing live RGB led count".to_string())?
+        .parse::<usize>()
+        .map_err(|error| format!("invalid live RGB led count: {error}"))?;
+
+    if leds != 82 {
+        return Err(format!("live RGB expected 82 LEDs, got {leds}"));
+    }
+
+    let frame = field(&fields, "frame").ok_or_else(|| "missing live RGB frame".to_string())?;
+
+    if frame.len() != leds * 6 || !frame.bytes().all(|value| value.is_ascii_hexdigit()) {
+        return Err("live RGB frame is not an 82-color hex payload".to_string());
+    }
+
+    let mut colors = Vec::with_capacity(leds);
+
+    for index in 0..leds {
+        let start = index * 6;
+        colors.push(format!("#{}", &frame[start..start + 6]).to_ascii_lowercase());
+    }
+
+    Ok(LiveRgbTelemetry {
+        version,
+        source: field(&fields, "source")
+            .unwrap_or("NATIVE_UNKNOWN")
+            .to_string(),
+        frame_valid: parse_yes_no(field(&fields, "frame_valid"), "frame_valid")?,
+        rgb_core_enabled: parse_on_off(field(&fields, "rgb"), "rgb")?,
+        overlay_enabled: parse_on_off(field(&fields, "overlay"), "overlay")?,
+        creator_scene_enabled: parse_on_off(field(&fields, "creator"), "creator")?,
+        colors,
+    })
+}
+
+fn parse_lcd_logical_status(response: &str) -> Result<LcdLogicalStatus, String> {
+    let fields = parse_fields(response);
+
+    if field(&fields, "lcd") != Some("STATUS") {
+        return Err("al80d did not return LCD logical status".to_string());
+    }
+
+    let mode = field(&fields, "mode")
+        .ok_or_else(|| "missing LCD logical mode".to_string())?
+        .to_string();
+
+    let generation = field(&fields, "generation")
+        .ok_or_else(|| "missing LCD logical generation".to_string())?
+        .parse::<u64>()
+        .map_err(|error| format!("invalid LCD logical generation: {error}"))?;
+
+    let percent = match field(&fields, "percent") {
+        Some("-") | None => None,
+        Some(value) => {
+            let parsed = value
+                .parse::<u8>()
+                .map_err(|error| format!("invalid LCD logical percent: {error}"))?;
+            if parsed > 100 {
+                return Err(format!("LCD logical percent out of range: {parsed}"));
+            }
+            Some(parsed)
+        }
+    };
+
+    let optional_token = |name: &str| -> Option<String> {
+        match field(&fields, name) {
+            Some("-") | None => None,
+            Some(value) => Some(value.to_string()),
+        }
+    };
+
+    Ok(LcdLogicalStatus {
+        mode,
+        generation,
+        percent,
+        muted: parse_yes_no(field(&fields, "muted"), "muted")?,
+        kind: optional_token("kind"),
+        value: optional_token("value"),
+    })
 }
 
 fn parse_status(response: &str) -> Result<DeviceStatus, String> {
@@ -347,8 +463,7 @@ fn host_library_root() -> Result<std::path::PathBuf, String> {
 
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| "HOME is unavailable".to_string())?;
+        let home = std::env::var_os("HOME").ok_or_else(|| "HOME is unavailable".to_string())?;
         return Ok(std::path::PathBuf::from(home)
             .join("Library")
             .join("Application Support")
@@ -361,8 +476,8 @@ fn host_library_root() -> Result<std::path::PathBuf, String> {
         let base = match std::env::var_os("XDG_DATA_HOME") {
             Some(value) => std::path::PathBuf::from(value),
             None => {
-                let home = std::env::var_os("HOME")
-                    .ok_or_else(|| "HOME is unavailable".to_string())?;
+                let home =
+                    std::env::var_os("HOME").ok_or_else(|| "HOME is unavailable".to_string())?;
                 std::path::PathBuf::from(home).join(".local").join("share")
             }
         };
@@ -446,19 +561,13 @@ fn write_host_library(library: String, json: String) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     if path.exists() {
         std::fs::remove_file(&path).map_err(|error| {
-            format!(
-                "Failed to replace host library {}: {error}",
-                path.display()
-            )
+            format!("Failed to replace host library {}: {error}", path.display())
         })?;
     }
 
     std::fs::rename(&temp, &path).map_err(|error| {
         let _ = std::fs::remove_file(&temp);
-        format!(
-            "Failed to publish host library {}: {error}",
-            path.display()
-        )
+        format!("Failed to publish host library {}: {error}", path.display())
     })?;
 
     Ok(format!(
@@ -603,6 +712,18 @@ fn validate_input_binding_request(
 }
 
 #[tauri::command]
+fn get_live_rgb_telemetry() -> Result<LiveRgbTelemetry, String> {
+    let response = ipc_request("TELEMETRY RGB")?;
+    parse_live_rgb_telemetry(&response)
+}
+
+#[tauri::command]
+fn get_lcd_logical_status() -> Result<LcdLogicalStatus, String> {
+    let response = ipc_request("LCD STATUS")?;
+    parse_lcd_logical_status(&response)
+}
+
+#[tauri::command]
 fn get_input_router_status() -> Result<String, String> {
     ipc_request("INPUT STATUS")
 }
@@ -732,6 +853,8 @@ pub fn run() {
             set_rgb_core_runtime,
             set_overlay_runtime,
             run_safe_extension_command,
+            get_live_rgb_telemetry,
+            get_lcd_logical_status,
             get_input_router_status,
             get_input_router_dump,
             get_input_event_status,

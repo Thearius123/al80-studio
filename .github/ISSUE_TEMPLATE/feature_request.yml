@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a safe, well-scoped AL80 Studio capability
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: truth
+    attributes:
+      label: Hardware truth / protocol assumptions
+      description: What must the keyboard, firmware, or host actually know?
+  - type: dropdown
+    id: persistent
+    attributes:
+      label: Does this require persistent device writes?
+      options:
+        - "No"
+        - "Maybe / unknown"
+        - "Yes"
+    validations:
+      required: true
