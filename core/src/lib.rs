@@ -344,6 +344,28 @@ impl DeviceInfo {
         })
     }
 
+    #[cfg(windows)]
+    fn open(&self) -> Result<RawHidTransport, String> {
+        use std::ffi::CString;
+
+        let path = CString::new(self.hid_path.clone())
+            .map_err(|_| "Windows AL80 HID path contains an interior NUL".to_string())?;
+
+        let api = hidapi::HidApi::new()
+            .map_err(|error| format!("cannot initialize Windows HIDAPI: {error}"))?;
+
+        let device = api
+            .open_path(path.as_c_str())
+            .map_err(|error| {
+                format!(
+                    "cannot open Windows AL80 Raw HID {}: {error}",
+                    self.devnode.display()
+                )
+            })?;
+
+        Ok(RawHidTransport::from_windows_device(device))
+    }
+
     #[cfg(unix)]
     fn open(&self) -> Result<RawHidTransport, String> {
         let file = OpenOptions::new()
