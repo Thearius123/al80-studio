@@ -19,7 +19,7 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW,
@@ -191,7 +191,17 @@ impl Write for NamedPipeStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        if !self.server_side {
+            return Ok(());
+        }
+
+        let ok = unsafe { FlushFileBuffers(self.handle) };
+
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }
 
@@ -338,6 +348,7 @@ mod tests {
 
             let stream = reader.get_mut();
             writeln!(stream, "OK PONG").unwrap();
+            stream.flush().unwrap();
         });
 
         ready_rx.recv().unwrap();
@@ -345,6 +356,50 @@ mod tests {
         let response = request_to(&name, "PING").unwrap();
         assert_eq!(response, "OK PONG");
 
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn windows_named_pipe_delayed_reader_preserves_reply() {
+        let name = format!(
+            r"\\.\pipe\al80d-test-delayed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let listener = NamedPipeListener::bind(&name).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+
+            let stream = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "PING");
+
+            let stream = reader.get_mut();
+            writeln!(stream, "OK PONG").unwrap();
+            stream.flush().unwrap();
+        });
+
+        ready_rx.recv().unwrap();
+
+        let mut client = NamedPipeStream::connect(&name).unwrap();
+        writeln!(client, "PING").unwrap();
+
+        thread::sleep(Duration::from_millis(150));
+
+        let mut reader = BufReader::new(client);
+        let mut response = String::new();
+        reader.read_line(&mut response).unwrap();
+
+        assert_eq!(response.trim(), "OK PONG");
         server.join().unwrap();
     }
 }

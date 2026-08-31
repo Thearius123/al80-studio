@@ -1501,7 +1501,16 @@ fn handle_client_windows(stream: NamedPipeStream, shared: SharedDevice) {
         Err(error) => format!("ERR {error}"),
     };
 
-    let _ = writeln!(reader.get_mut(), "{response}");
+    let stream = reader.get_mut();
+
+    if let Err(error) = writeln!(stream, "{response}") {
+        eprintln!("AL80D_WINDOWS_PIPE_WRITE_ERROR={error}");
+        return;
+    }
+
+    if let Err(error) = stream.flush() {
+        eprintln!("AL80D_WINDOWS_PIPE_FLUSH_ERROR={error}");
+    }
 }
 
 #[cfg(windows)]

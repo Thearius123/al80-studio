@@ -44,7 +44,7 @@ jobs:
         run: cargo test --manifest-path core/Cargo.toml --no-run
 
       - name: Windows Named Pipe IPC round trip
-        run: cargo test --manifest-path core/Cargo.toml windows_named_pipe_round_trip -- --nocapture
+        run: cargo test --manifest-path core/Cargo.toml windows_named_pipe_ -- --nocapture
 
       - name: Windows HID transport contract tests
         run: cargo test --manifest-path core/Cargo.toml windows_hid_ -- --nocapture

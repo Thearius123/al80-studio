@@ -159,3 +159,15 @@ Core Audio physical behavior, startup behavior, or installer behavior.
 
 Controlled runtime/device validation belongs to Stage D2B and only follows a
 successful D2A run on the actual Windows machine.
+
+### Stage D2B1 — physical Windows Named Pipe reply lifecycle
+
+Physical Windows validation proved HID open and Core Audio watcher startup, but
+cross-process `al80ctl` reads failed with Win32 error 233. The server previously
+wrote a reply and then dropped the pipe; `Drop` called `DisconnectNamedPipe`
+while the transport `flush()` was a no-op.
+
+The Windows transport now uses `FlushFileBuffers` on the server end and the
+daemon explicitly performs `write -> flush -> disconnect/drop`. CI also includes
+a delayed-reader regression test to model a separately scheduled `al80ctl.exe`.
+Physical retest remains pending for this updated build.
